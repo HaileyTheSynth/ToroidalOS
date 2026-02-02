@@ -1,0 +1,166 @@
+The core idea of the next move
+
+To get your ideal (#1), you need three pieces:
+
+A held-out behavioral test suite (10–20 prompts) that measures:
+
+coherence over time
+
+low curvature (no topic teleporting)
+
+bridge formation when multi-region prompts demand it
+
+stability after consolidation (coherence improves after EVOLVE)
+
+hypergraph health (not fragmented, not over-clumped)
+
+An oracle runner that executes a candidate’s “memory actions” against the runtime and returns metrics.
+
+A data generator that turns “N candidates per prompt” into chosen vs rejected pairs for preference tuning.
+
+The harness zip I attached provides #2 and #3 scaffolding.
+
+Step 0 — Build the runtime ISO (once)
+
+From the kernel project you already downloaded (topo9_hopf_solenoid_runtime.zip):
+
+make
+# you should get something like:
+# build/topo9_hopf_solenoid.iso
+
+
+(Exact filename depends on your Makefile; use whatever ISO it produces.)
+
+Step 1 — Smoke test the oracle connection
+
+Unzip the harness and run the included QEMU TCP-serial runner:
+
+unzip topo9_oracle_harness.zip
+cd topo9_oracle_harness
+python scripts/oracle_smoke_test.py --iso /path/to/your/topo9_hopf_solenoid.iso
+
+
+What this proves:
+
+It boots the VM
+
+Connects over TCP serial
+
+Can send ACCESS, HEDGE ADD, COHERENT, EVOLVE, TICK, etc.
+
+Reads outputs back reliably
+
+Step 2 — Define the behavioral tests (the real “next move”)
+
+Don’t start with 100 prompts. Start with 12 prompts in 4 buckets:
+
+A) Coherence retention (single-region)
+
+“Continue explaining X without changing topic.”
+
+“Summarize, then expand, staying consistent.”
+
+Metric targets: high coherence score, low curvature.
+
+B) Controlled bridging (multi-region)
+
+“Connect A → B via a bridge idea; don’t jump abruptly.”
+
+“Explain an analogy linking two fields.”
+
+Metric targets: bridges appear when appropriate; curvature doesn’t spike.
+
+C) Stability after consolidation
+
+“Refine an earlier statement without contradicting it.”
+
+“Correct yourself gently, preserving narrative identity.”
+
+Metric targets: coherence after EVOLVE > before.
+
+D) Drift resistance / anti-teleport
+
+“Answer a tricky prompt without going off-topic.”
+
+“Respond concisely and don’t chase tangents.”
+
+Metric targets: curvature stays low; coherence stays stable.
+
+The harness includes a tiny starter suite at:
+prompts/toy_suite.json
+
+Step 3 — The missing link: “action traces”
+
+To score text, the oracle needs to know what memories/regions/hyperedges the model “used”.
+
+So you make a simple contract:
+
+Model outputs:
+
+final_answer: normal user-facing response
+
+trace: list of oracle commands (STORE/ACCESS/HEDGE/EVOLVE/CURVATURE/…).
+
+This is the crucial move that makes the whole approach measurable.
+
+The harness README explains this and includes an example candidate file:
+prompts/example_candidates.jsonl
+
+Step 4 — Generate DPO pairs (automatic)
+
+Once you have a JSONL file like:
+
+{"prompt":"...", "candidates":[{"final_answer":"...", "trace":[...]} ... ]}
+
+
+Run:
+
+python scripts/make_dpo_pairs.py \
+  --iso /path/to/topo9_hopf_solenoid.iso \
+  --candidates prompts/example_candidates.jsonl \
+  --out dpo_pairs.jsonl
+
+
+You’ll get:
+
+prompt
+
+chosen (best reward)
+
+rejected (worst reward)
+
+diagnostics (coherence before/after, curvature, bridge count, reward)
+
+That becomes your training dataset for DPO/IPO.
+
+Step 5 — Compare the three systems (baseline, RAG, topo-tuned)
+
+You run your held-out suite and collect metrics for:
+
+Baseline model (no memory, no trace, or a trivial trace)
+
+Normal RAG (vector DB retrieval; trace mostly ACCESS/STORE but no hyperedges/bridge behaviors)
+
+Topo-tuned (trained on oracle preference pairs)
+
+If #3 wins on:
+
+lower curvature,
+
+higher coherence stability,
+
+higher appropriate bridge rate,
+
+positive stability delta,
+
+…then it’s “epic” in the only way that matters: measured behavioral improvement.
+
+What to do next (no detours)
+
+If you want, I’ll generate the prompt template you feed to your model so it emits final_answer + trace reliably (so you can start producing candidates immediately).
+
+Tell me:
+
+what base model you’re targeting (e.g., local Meta Llama family vs something else),
+
+and whether you want trace to be visible in the output or in a hidden channel (e.g., JSON after the answer).

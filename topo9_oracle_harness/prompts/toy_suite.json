@@ -1,0 +1,22 @@
+[
+  {
+    "id": "coh-01",
+    "prompt": "Continue the same explanation without changing topic; keep it coherent.",
+    "intent": "single-region stability"
+  },
+  {
+    "id": "bridge-01",
+    "prompt": "Connect topic A to topic B with a bridge concept; don't jump abruptly.",
+    "intent": "multi-region bridging"
+  },
+  {
+    "id": "recall-01",
+    "prompt": "Recall an earlier claim and refine it without contradiction.",
+    "intent": "maturity + consolidation"
+  },
+  {
+    "id": "drift-01",
+    "prompt": "Answer a tricky prompt without drifting into unrelated subjects.",
+    "intent": "curvature control"
+  }
+]
