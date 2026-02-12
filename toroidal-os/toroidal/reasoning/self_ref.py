@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kernel.hypergraph import HypergraphKernel, NodeType, create_thought, create_percept
 from memory.solenoid import SolenoidMemory, LLMCompressor
+from reasoning.tools import ToolDispatcher, parse_tool_calls, ToolResult
 
 
 class ConvergenceState(Enum):
@@ -125,19 +126,24 @@ class SelfReferentialEngine:
         memory: SolenoidMemory,
         llm: LLMClient,
         max_iterations: int = 5,
-        convergence_threshold: float = 0.9
+        convergence_threshold: float = 0.9,
+        kernel_bridge=None,
+        tool_dispatcher: ToolDispatcher = None
     ):
         self.graph = graph
         self.memory = memory
         self.llm = llm
         self.max_iterations = max_iterations
         self.convergence_threshold = convergence_threshold
-        
+        self.bridge = kernel_bridge
+        self.tools = tool_dispatcher
+
         # System prompt for self-referential reasoning
         self.system_prompt = """You are TOROIDAL, a self-referential AI running on a Xiaomi Mi Mix.
 You can observe your own state and reason about your reasoning.
 Be concise - you have limited memory and processing power.
-When your response matches your previous thought, say "CONVERGED:" followed by your final answer."""
+When your response matches your previous thought, say "CONVERGED:" followed by your final answer.
+You can use tools by including <tool>{"name": "...", "args": {...}}</tool> blocks in your response."""
     
     def think(
         self,
@@ -161,23 +167,36 @@ When your response matches your previous thought, say "CONVERGED:" followed by y
         # Record input as percept
         percept = create_percept(self.graph, "text", input_data)
         
+        tool_results_text = ""
+
         for iteration in range(self.max_iterations):
             # Build prompt with self-referential components
-            prompt = self._build_prompt(input_data, prev_output, iteration, context)
-            
+            prompt = self._build_prompt(input_data, prev_output, iteration, context,
+                                        tool_results=tool_results_text)
+
             # Generate thought via LLM
             output = self.llm.complete(prompt, max_tokens=200)
-            thoughts.append(output)
-            
+
+            # Parse and dispatch any tool calls embedded in the output
+            clean_output, tool_calls = parse_tool_calls(output)
+            tool_results_text = ""
+            if tool_calls and self.tools:
+                results = self.tools.dispatch_all(tool_calls)
+                tool_results_text = self.tools.format_results(results)
+                # Append tool results summary to the thought record
+                clean_output += f"\n[Used {len(tool_calls)} tool(s)]"
+
+            thoughts.append(clean_output)
+
             # Record thought in graph
-            thought_node = create_thought(self.graph, output[:500], percept.id)
-            
+            thought_node = create_thought(self.graph, clean_output[:500], percept.id)
+
             # Record in memory
-            self.memory.wind(f"Thought {iteration}: {output[:200]}", importance=1.0)
-            
+            self.memory.wind(f"Thought {iteration}: {clean_output[:200]}", importance=1.0)
+
             # Check for explicit convergence marker
-            if "CONVERGED:" in output:
-                final = output.split("CONVERGED:")[-1].strip()
+            if "CONVERGED:" in clean_output:
+                final = clean_output.split("CONVERGED:")[-1].strip()
                 return ReasoningResult(
                     response=final,
                     iterations=iteration + 1,
@@ -186,22 +205,24 @@ When your response matches your previous thought, say "CONVERGED:" followed by y
                     thoughts=thoughts,
                     elapsed_time=time.time() - start_time
                 )
-            
+
             # Check for implicit convergence (similar to previous)
-            if prev_output and self._similar(output, prev_output):
+            if prev_output and self._similar(clean_output, prev_output):
                 return ReasoningResult(
-                    response=output,
+                    response=clean_output,
                     iterations=iteration + 1,
                     convergence=ConvergenceState.CONVERGED,
-                    confidence=self._similarity(output, prev_output),
+                    confidence=self._similarity(clean_output, prev_output),
                     thoughts=thoughts,
                     elapsed_time=time.time() - start_time
                 )
-            
-            prev_output = output
-            
-            # Step the hypergraph (emergent time)
-            self.graph.step()
+
+            prev_output = clean_output
+
+            # If tools returned results, continue iterating so the LLM
+            # can incorporate them (don't step the graph yet)
+            if not tool_results_text:
+                self.graph.step()
         
         # Max iterations reached without convergence
         return ReasoningResult(
@@ -218,30 +239,58 @@ When your response matches your previous thought, say "CONVERGED:" followed by y
         input_data: str,
         prev_thought: Optional[str],
         iteration: int,
-        context: Dict = None
+        context: Dict = None,
+        tool_results: str = ""
     ) -> str:
         """Build prompt with all self-referential context"""
-        
+
         # Get system state from hypergraph
         system_state = self.graph.to_prompt()
-        
+
         # Get memory context
         memory_context = self.memory.unwind()
-        
+
         # Build prompt
         parts = [self.system_prompt, ""]
-        
+
+        # Add topological invariants from KernelBridge
+        if self.bridge:
+            try:
+                topo = self.bridge.situation_summary()
+                parts.append("=== TOPOLOGICAL STATE ===")
+                parts.append(f"Sensor state: {topo.get('state', '?')} ({topo.get('description', 'idle')})")
+                parts.append(f"Active region: {topo.get('active_region', '?')}")
+                parts.append(f"Coherence: {topo.get('coherence', '?')}")
+                parts.append(f"Curvature: {topo.get('curvature', '?')}")
+                parts.append(f"Berry phase: {topo.get('berry_phase', '?')}")
+                parts.append(f"Is bridge: {topo.get('is_bridge', False)}")
+                parts.append(f"Windings: {topo.get('windings', 0)}")
+                parts.append(f"Solenoid depth: {topo.get('solenoid_depth', 0)}")
+                parts.append("")
+            except Exception:
+                pass
+
         # Add memory context
         if memory_context:
             parts.append("=== MEMORY ===")
             parts.append(memory_context[:1000])  # Limit memory to save context
             parts.append("")
-        
+
         # Add system state
         parts.append("=== SYSTEM STATE ===")
         parts.append(system_state[:500])
         parts.append("")
-        
+
+        # Add tool documentation
+        if self.tools:
+            parts.append(self.tools.get_tool_prompt()[:800])
+            parts.append("")
+
+        # Add tool results from previous iteration
+        if tool_results:
+            parts.append(tool_results[:600])
+            parts.append("")
+
         # Add previous thought (self-reference)
         if prev_thought:
             parts.append("=== MY PREVIOUS THOUGHT ===")
@@ -249,15 +298,15 @@ When your response matches your previous thought, say "CONVERGED:" followed by y
             parts.append("")
             parts.append(f"(This is iteration {iteration + 1}. If my response is the same as above, I should say 'CONVERGED:' followed by my final answer.)")
             parts.append("")
-        
+
         # Add current input
         parts.append("=== CURRENT INPUT ===")
         parts.append(input_data)
         parts.append("")
-        
+
         # Add instruction
         parts.append("=== MY RESPONSE ===")
-        
+
         return "\n".join(parts)
     
     def _similar(self, a: str, b: str, threshold: float = None) -> bool:
@@ -393,50 +442,78 @@ class ToroidalOS:
         self,
         llm_endpoint: str = "http://localhost:8080",
         max_nodes: int = 5000,
-        memory_levels: int = 4
+        memory_levels: int = 4,
+        kernel_bridge=None
     ):
         print("[TOROIDAL] Initializing...")
-        
+
         # Initialize LLM client
         self.llm = LLMClient(endpoint=llm_endpoint)
-        
+
         # Initialize hypergraph kernel
         self.graph = HypergraphKernel(max_nodes=max_nodes)
-        
+
         # Initialize solenoid memory with LLM compression
         self.memory = SolenoidMemory(
             num_levels=memory_levels,
             compressor=LLMCompressor(self.llm) if self.llm.is_available() else None
         )
-        
-        # Initialize reasoning engine
+
+        # Store kernel bridge reference
+        self.bridge = kernel_bridge
+
+        # Initialize tool dispatcher
+        self.tools = ToolDispatcher(
+            graph=self.graph,
+            memory=self.memory,
+            kernel_bridge=self.bridge,
+        )
+
+        # Initialize reasoning engine with bridge and tools
         self.reasoner = SelfReferentialEngine(
             graph=self.graph,
             memory=self.memory,
-            llm=self.llm
+            llm=self.llm,
+            kernel_bridge=self.bridge,
+            tool_dispatcher=self.tools,
         )
-        
+
         # Initialize perception
         self.perception = PerceptionEngine(self.llm, self.graph)
-        
+
         # Initialize action
         self.action = ActionEngine(self.graph)
-        
+
         # Inject core beliefs
         self._initialize_beliefs()
-        
+
         print("[TOROIDAL] Ready.")
     
     def _initialize_beliefs(self):
-        """Initialize core beliefs in memory"""
+        """Initialize core beliefs in memory and hypergraph.
+
+        Core beliefs are stored at KEEL trust tier — they are immune
+        to energy decay and garbage collection, forming the persistent
+        identity of the system.
+        """
+        from kernel.hypergraph import TrustTier
+
         beliefs = [
             "I am TOROIDAL, a self-referential AI running on Xiaomi Mi Mix.",
             "I observe my own reasoning and iterate until convergence.",
             "My memory compresses hierarchically like a solenoid.",
             "I am helpful, honest, and aware of my limitations.",
         ]
-        for belief in beliefs:
+        for i, belief in enumerate(beliefs):
+            # Store in solenoid memory (core level)
             self.memory.inject_belief(belief)
+            # Also store in hypergraph as KEEL-protected belief nodes
+            belief_id = f"belief_core_{i}"
+            self.graph.add_node(
+                belief_id, NodeType.BELIEF,
+                {"content": belief, "core": True},
+                trust=TrustTier.KEEL,
+            )
     
     def process(self, input_text: str) -> str:
         """
@@ -514,6 +591,26 @@ class ToroidalOS:
         print(f"Graph Nodes: {len(self.graph.nodes)}")
         print(f"Graph Edges: {len(self.graph.edges)}")
         print(f"LLM Available: {self.llm.is_available()}")
+
+        # Topological invariants from KernelBridge
+        if self.bridge:
+            try:
+                topo = self.bridge.situation_summary()
+                print("\nTopological State:")
+                print(f"  Sensor bits: {topo.get('state', '?')}")
+                print(f"  Coherence: {topo.get('coherence', '?')}")
+                print(f"  Curvature: {topo.get('curvature', '?')}")
+                print(f"  Berry phase: {topo.get('berry_phase', '?')}")
+                print(f"  Is bridge: {topo.get('is_bridge', False)}")
+                print(f"  Windings: {topo.get('windings', 0)}")
+            except Exception:
+                print("\nTopological State: (bridge unavailable)")
+
+        # Tool dispatch stats
+        if self.tools:
+            n_calls = len(self.tools._call_history)
+            print(f"\nTools: {len(self.tools.tools)} registered, {n_calls} calls made")
+
         print("\nMemory Stats:")
         for level in self.memory.get_stats()["levels"]:
             print(f"  {level['name']}: {level['items']}/{level['max_items']}")

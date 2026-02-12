@@ -80,6 +80,18 @@ static inline uint16_t ang_dist(uint16_t a, uint16_t b) {
 /* Solenoid history: store last H states (like a shift-register of "experienced" states) */
 #define SOL_H 16
 
+/* Trust tiers: 2-bit field encoding node resilience.
+   KEEL nodes are core identity — immune to decay and GC.
+   HULL nodes are important context — reduced decay rate.
+   CARGO nodes are normal working memory.
+   EPHEMERAL nodes decay fast and are GC'd first. */
+typedef enum {
+    TRUST_KEEL      = 0,  /* Core beliefs, identity — never decayed */
+    TRUST_HULL      = 1,  /* Important context — slow decay */
+    TRUST_CARGO     = 2,  /* Normal working memory */
+    TRUST_EPHEMERAL = 3   /* Temporary — fast decay, GC priority */
+} TrustTier;
+
 typedef struct {
     uint8_t used;
     BitState state;
@@ -90,6 +102,7 @@ typedef struct {
     uint8_t last_region;
     uint8_t region_mask; /* bits 0..2 */
     uint16_t access_count;
+    uint8_t trust;       /* TrustTier: 0=KEEL, 1=HULL, 2=CARGO, 3=EPHEMERAL */
 
     /* Torus angles (educational tags): theta1..theta4 in degrees */
     uint16_t th1, th2, th3, th4;
@@ -451,7 +464,7 @@ static void serial_write_bits9(BitState s) { for (int i = 8; i >= 0; --i) serial
 /* ===========================
    Node ops + init
    =========================== */
-static int store_node(BitState st, uint8_t region) {
+static int store_node_trust(BitState st, uint8_t region, uint8_t trust) {
     if (node_count >= NMAX) return -1;
     uint8_t id = node_count++;
     nodes[id].used = 1;
@@ -462,6 +475,7 @@ static int store_node(BitState st, uint8_t region) {
     nodes[id].last_region = (uint8_t)(region % 3);
     nodes[id].region_mask = (uint8_t)(1U << (region % 3));
     nodes[id].access_count = 0;
+    nodes[id].trust = (uint8_t)(trust & 3);
 
     nodes[id].th1 = mod360(id * 17U);
     nodes[id].th2 = mod360(id * 29U);
@@ -472,6 +486,10 @@ static int store_node(BitState st, uint8_t region) {
     for (int i = 0; i < SOL_H; ++i) nodes[id].sol_hist[i] = 0;
     sol_push(&nodes[id], nodes[id].state);
     return (int)id;
+}
+
+static int store_node(BitState st, uint8_t region) {
+    return store_node_trust(st, region, TRUST_CARGO);
 }
 
 static void init_seed_nodes(void) {
@@ -574,6 +592,7 @@ static void print_help(void) {
         "  CURVATURE\n"
         "  EVOLVE <steps>\n"
         "  TICK [n]\n"
+        "  TRUST <id> [KEEL|HULL|CARGO|EPHEMERAL]  Get/set trust tier\n"
     );
 }
 
@@ -638,8 +657,34 @@ static void cmd_list(uint32_t n) {
         serial_write_u32(x->th4);
         serial_write_str(" acc=");
         serial_write_u32(x->access_count);
+        serial_write_str(" T=");
+        serial_write_str(trust_name(x->trust));
         serial_write_str("\n");
     }
+}
+
+static const char* trust_name(uint8_t t) {
+    switch (t) {
+        case TRUST_KEEL:      return "KEEL";
+        case TRUST_HULL:      return "HULL";
+        case TRUST_CARGO:     return "CARGO";
+        case TRUST_EPHEMERAL: return "EPHEMERAL";
+        default:              return "?";
+    }
+}
+
+static uint8_t parse_trust(const char* s, int* ok) {
+    *ok = 1;
+    if (str_ieq(s, "KEEL"))      return TRUST_KEEL;
+    if (str_ieq(s, "HULL"))      return TRUST_HULL;
+    if (str_ieq(s, "CARGO"))     return TRUST_CARGO;
+    if (str_ieq(s, "EPHEMERAL")) return TRUST_EPHEMERAL;
+    /* Also accept numeric 0-3 */
+    int ok2 = 0;
+    uint32_t v = parse_u32(s, &ok2);
+    if (ok2 && v <= 3) return (uint8_t)v;
+    *ok = 0;
+    return TRUST_CARGO;
 }
 
 static void cmd_store(const char* a0, const char* a1) {
@@ -671,6 +716,27 @@ static void cmd_store(const char* a0, const char* a1) {
     serial_write_bits9(nodes[id].state);
     serial_write_str(" region=");
     serial_write_u32(region);
+    serial_write_str(" trust=");
+    serial_write_str(trust_name(nodes[id].trust));
+    serial_write_str("\n");
+}
+
+static void cmd_trust(const char* a0, const char* a1) {
+    int ok0 = 0;
+    uint32_t id = parse_u32(a0, &ok0);
+    if (!ok0 || id >= node_count) { serial_write_str("ERR invalid id\n"); return; }
+
+    if (a1) {
+        int ok1 = 0;
+        uint8_t t = parse_trust(a1, &ok1);
+        if (!ok1) { serial_write_str("ERR trust must be KEEL|HULL|CARGO|EPHEMERAL\n"); return; }
+        nodes[id].trust = t;
+    }
+
+    serial_write_str("OK id=");
+    serial_write_u32(id);
+    serial_write_str(" trust=");
+    serial_write_str(trust_name(nodes[id].trust));
     serial_write_str("\n");
 }
 
@@ -996,6 +1062,7 @@ static void dispatch_command(char* line) {
     else if (str_ieq(tok[0], "CURVATURE")) cmd_curvature();
     else if (str_ieq(tok[0], "EVOLVE")) cmd_evolve(nt >= 2 ? tok[1] : 0);
     else if (str_ieq(tok[0], "TICK")) cmd_tick(nt >= 2 ? tok[1] : 0);
+    else if (str_ieq(tok[0], "TRUST")) cmd_trust(nt >= 2 ? tok[1] : 0, nt >= 3 ? tok[2] : 0);
     else serial_write_str("ERR unknown command (try HELP)\n");
 }
 

@@ -30,6 +30,29 @@ class NodeType(Enum):
     BELIEF = "belief"
 
 
+class TrustTier(Enum):
+    """Trust tiers control decay rate and GC immunity.
+
+    KEEL: Core identity/beliefs - immune to decay and GC.
+    HULL: Important context - reduced decay (0.25x rate).
+    CARGO: Normal working memory - standard decay.
+    EPHEMERAL: Temporary nodes - accelerated decay (4x rate), GC priority.
+    """
+    KEEL = 0
+    HULL = 1
+    CARGO = 2
+    EPHEMERAL = 3
+
+
+# Decay rate multipliers per trust tier
+_DECAY_MULTIPLIER = {
+    TrustTier.KEEL: 0.0,       # Never decays
+    TrustTier.HULL: 0.25,      # Slow decay
+    TrustTier.CARGO: 1.0,      # Normal
+    TrustTier.EPHEMERAL: 4.0,  # Fast decay
+}
+
+
 @dataclass
 class Node:
     """A node in the hypergraph"""
@@ -40,17 +63,19 @@ class Node:
     last_accessed: float = field(default_factory=time.time)
     access_count: int = 0
     energy: float = 1.0  # Activation energy
-    
+    trust: TrustTier = TrustTier.CARGO
+
     def touch(self):
         """Mark node as accessed"""
         self.last_accessed = time.time()
         self.access_count += 1
         self.energy = min(1.0, self.energy + 0.1)
-    
+
     def decay(self, rate: float = 0.01):
-        """Energy decay over time"""
-        self.energy = max(0.0, self.energy - rate)
-    
+        """Energy decay, modulated by trust tier"""
+        multiplier = _DECAY_MULTIPLIER.get(self.trust, 1.0)
+        self.energy = max(0.0, self.energy - rate * multiplier)
+
     def hash(self) -> str:
         """Content-addressable hash"""
         content = json.dumps(self.data, sort_keys=True)
@@ -112,7 +137,7 @@ class HypergraphKernel:
     
     def _create_self_model(self):
         """Create initial self-referential structure"""
-        # Create meta-node representing the graph itself
+        # Create meta-node representing the graph itself (KEEL: core identity)
         self_node = Node(
             id="__self__",
             type=NodeType.BELIEF,
@@ -121,11 +146,12 @@ class HypergraphKernel:
                 "tau": 0,
                 "node_count": 0,
                 "edge_count": 0
-            }
+            },
+            trust=TrustTier.KEEL,
         )
         self.nodes["__self__"] = self_node
-        
-        # Create root process node
+
+        # Create root process node (KEEL: always running)
         root = Node(
             id="__root__",
             type=NodeType.PROCESS,
@@ -133,10 +159,11 @@ class HypergraphKernel:
                 "name": "kernel",
                 "state": "running",
                 "priority": 1.0
-            }
+            },
+            trust=TrustTier.KEEL,
         )
         self.nodes["__root__"] = root
-        
+
         # Connect root to self
         self._add_edge("__root__", "__self__", "observes")
     
@@ -164,22 +191,23 @@ class HypergraphKernel:
     # PUBLIC API
     # ========================================================================
     
-    def add_node(self, id: str, type: NodeType, data: Dict[str, Any] = None) -> Node:
+    def add_node(self, id: str, type: NodeType, data: Dict[str, Any] = None,
+                 trust: TrustTier = TrustTier.CARGO) -> Node:
         """Add a node to the hypergraph"""
         with self._lock:
             if len(self.nodes) >= self.max_nodes:
                 self._garbage_collect()
-            
-            node = Node(id=id, type=type, data=data or {})
+
+            node = Node(id=id, type=type, data=data or {}, trust=trust)
             self.nodes[id] = node
-            
+
             # Connect to self-model
             self._add_edge(id, "__self__", "part_of", 0.1)
-            
+
             self.tau += 1
             self._update_self_model()
             self._notify_observers("node_added", node)
-            
+
             return node
     
     def add_edge(self, source: str, target: str, relation: str, weight: float = 1.0) -> Optional[str]:
@@ -325,21 +353,39 @@ class HypergraphKernel:
     # ========================================================================
     
     def _garbage_collect(self):
-        """Remove low-energy, low-connectivity nodes"""
-        # Protected nodes
+        """Remove low-energy, low-connectivity nodes.
+
+        Trust tiers affect GC:
+        - KEEL nodes are never removed (core identity)
+        - HULL nodes get a score bonus (harder to GC)
+        - CARGO nodes are scored normally
+        - EPHEMERAL nodes get a score penalty (easier to GC)
+        """
+        # Protected nodes (structural + KEEL trust)
         protected = {"__self__", "__root__"}
-        
+
+        # Trust-based score adjustments
+        trust_bonus = {
+            TrustTier.KEEL: float('inf'),   # Never GC'd
+            TrustTier.HULL: 100.0,
+            TrustTier.CARGO: 0.0,
+            TrustTier.EPHEMERAL: -50.0,
+        }
+
         # Score all nodes
         scores = []
         for node_id, node in self.nodes.items():
             if node_id in protected:
                 continue
+            if node.trust == TrustTier.KEEL:
+                continue  # KEEL nodes are immune
             score = self.get_connectivity(node_id) * node.energy
+            score += trust_bonus.get(node.trust, 0.0)
             scores.append((node_id, score))
-        
+
         # Sort by score (lowest first)
         scores.sort(key=lambda x: x[1])
-        
+
         # Remove bottom 10%
         to_remove = scores[:len(scores) // 10]
         for node_id, _ in to_remove:
@@ -409,11 +455,17 @@ class HypergraphKernel:
             reverse=True
         )[:5]
         
+        # Count nodes by trust tier
+        trust_counts = {t: 0 for t in TrustTier}
+        for n in self.nodes.values():
+            trust_counts[n.trust] = trust_counts.get(n.trust, 0) + 1
+
         summary = f"""SYSTEM STATE at τ={self.tau}:
 - Total nodes: {len(self.nodes)}
 - Total edges: {len(self.edges)}
 - Active processes: {len(active_processes)}
 - Recent thoughts: {len(recent_thoughts)}
+- Trust: KEEL={trust_counts[TrustTier.KEEL]} HULL={trust_counts[TrustTier.HULL]} CARGO={trust_counts[TrustTier.CARGO]} EPHEMERAL={trust_counts[TrustTier.EPHEMERAL]}
 
 ACTIVE PROCESSES:
 """
