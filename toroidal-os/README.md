@@ -347,7 +347,11 @@ This is an experimental project. Contributions welcome for:
 
 ## License
 
-MIT License
+Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
+
+Copyright (c) 2026 HaileyTheSynth
+Contact: haileythesynth@gmail.com
+Source: https://github.com/HaileyTheSynth
 
 ---
 
