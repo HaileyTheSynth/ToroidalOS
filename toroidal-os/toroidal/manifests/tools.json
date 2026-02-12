@@ -1,0 +1,75 @@
+[
+  {
+    "name": "web_fetch",
+    "version": "1.0",
+    "description": "Fetch a URL and return its text content. Only available when in KNOWLEDGE_GAP epistemic state.",
+    "region": "ENVIRON",
+    "berry_cost": 80,
+    "prerequisites": ["epistemic_check"],
+    "parameters": {
+      "url": {"type": "string", "description": "URL to fetch", "required": true},
+      "max_chars": {"type": "integer", "description": "Max chars to return", "default": 4000}
+    },
+    "handler": "reasoning.tools_ext:handle_web_fetch",
+    "requires_confirmation": false,
+    "cooldown_ms": 5000,
+    "tags": ["network", "external", "epistemic-gated"]
+  },
+  {
+    "name": "web_search",
+    "version": "1.0",
+    "description": "Search the web for information. Only available when in KNOWLEDGE_GAP epistemic state.",
+    "region": "ENVIRON",
+    "berry_cost": 80,
+    "prerequisites": ["epistemic_check"],
+    "parameters": {
+      "query": {"type": "string", "description": "Search query", "required": true},
+      "max_results": {"type": "integer", "description": "Max results to return", "default": 3}
+    },
+    "handler": "reasoning.tools_ext:handle_web_search",
+    "requires_confirmation": false,
+    "cooldown_ms": 5000,
+    "tags": ["network", "external", "epistemic-gated"]
+  },
+  {
+    "name": "sensor_request",
+    "version": "1.0",
+    "description": "Request a specific sensor reading: battery, location, orientation, light, pressure.",
+    "region": "ENVIRON",
+    "berry_cost": 50,
+    "prerequisites": [],
+    "parameters": {
+      "sensor": {"type": "string", "description": "Sensor name: battery, location, orientation, light, pressure", "required": true}
+    },
+    "handler": "reasoning.tools_ext:handle_sensor_request",
+    "requires_confirmation": false,
+    "cooldown_ms": 1000,
+    "tags": ["sensor", "hardware"]
+  },
+  {
+    "name": "time_now",
+    "version": "1.0",
+    "description": "Get current time and system uptime.",
+    "region": "ENVIRON",
+    "berry_cost": 10,
+    "prerequisites": [],
+    "parameters": {},
+    "handler": "reasoning.tools_ext:handle_time_now",
+    "requires_confirmation": false,
+    "cooldown_ms": 0,
+    "tags": ["system", "time"]
+  },
+  {
+    "name": "system_info",
+    "version": "1.0",
+    "description": "Get hardware and memory information (CPU, RAM, load).",
+    "region": "ENVIRON",
+    "berry_cost": 10,
+    "prerequisites": [],
+    "parameters": {},
+    "handler": "reasoning.tools_ext:handle_system_info",
+    "requires_confirmation": false,
+    "cooldown_ms": 0,
+    "tags": ["system", "hardware"]
+  }
+]

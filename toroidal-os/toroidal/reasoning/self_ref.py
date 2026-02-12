@@ -28,6 +28,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kernel.hypergraph import HypergraphKernel, NodeType, create_thought, create_percept
 from memory.solenoid import SolenoidMemory, LLMCompressor
 from reasoning.tools import ToolDispatcher, parse_tool_calls, ToolResult
+from reasoning.topo_protocol import TopoProtocol
+from reasoning.epistemic import EpistemicDetector, create_epistemic_prerequisite
 
 
 class ConvergenceState(Enum):
@@ -469,6 +471,28 @@ class ToroidalOS:
             kernel_bridge=self.bridge,
         )
 
+        # Initialize epistemic state detector
+        self.epistemic = EpistemicDetector(
+            memory=self.memory,
+            tool_dispatcher=self.tools,
+            kernel_bridge=self.bridge,
+        )
+
+        # Initialize topo:// protocol with prerequisite enforcement
+        self.protocol = TopoProtocol(self.tools)
+        self.protocol.prerequisites.register(
+            "epistemic_check",
+            create_epistemic_prerequisite(self.epistemic),
+        )
+
+        # Load extended tool manifests
+        manifests_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "..", "manifests")
+        if os.path.isdir(manifests_dir):
+            loaded = self.protocol.load_manifests_dir(manifests_dir)
+            if loaded:
+                print(f"[TOROIDAL] Loaded {len(loaded)} tools via topo:// protocol")
+
         # Initialize reasoning engine with bridge and tools
         self.reasoner = SelfReferentialEngine(
             graph=self.graph,
@@ -606,10 +630,21 @@ class ToroidalOS:
             except Exception:
                 print("\nTopological State: (bridge unavailable)")
 
+        # Epistemic state
+        if hasattr(self, 'epistemic'):
+            detection = self.epistemic.get_cached()
+            if detection:
+                print(f"\nEpistemic State: {detection.state.value}")
+                print(f"  Web policy: {detection.web_policy}")
+                print(f"  Confidence: {detection.confidence:.2f}")
+            else:
+                print(f"\nEpistemic State: (not yet detected)")
+
         # Tool dispatch stats
         if self.tools:
             n_calls = len(self.tools._call_history)
-            print(f"\nTools: {len(self.tools.tools)} registered, {n_calls} calls made")
+            n_topo = len(self.protocol.manifests) if hasattr(self, 'protocol') else 0
+            print(f"\nTools: {len(self.tools.tools)} registered ({n_topo} via topo://), {n_calls} calls made")
 
         print("\nMemory Stats:")
         for level in self.memory.get_stats()["levels"]:
