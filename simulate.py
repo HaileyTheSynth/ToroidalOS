@@ -94,6 +94,13 @@ HEDGE_CUSTOM = 4
 
 HEDGE_NAMES = ["CONV", "TOPIC", "ENTITY", "FIBER", "CUSTOM"]
 
+# Trust tiers
+TRUST_KEEL = 0       # Core identity — immune to decay/GC
+TRUST_HULL = 1       # Important context — slow decay
+TRUST_CARGO = 2      # Normal working memory
+TRUST_EPHEMERAL = 3  # Temporary — fast decay, GC priority
+TRUST_NAMES = ["KEEL", "HULL", "CARGO", "EPHEMERAL"]
+
 
 class Node:
     def __init__(self):
@@ -105,6 +112,7 @@ class Node:
         self.last_region = 0
         self.region_mask = 0
         self.access_count = 0
+        self.trust = TRUST_CARGO  # default trust tier
         self.th1 = 0
         self.th2 = 0
         self.th3 = 0
@@ -258,7 +266,7 @@ class Kernel:
         return acc // cnt if cnt else 500
 
     # --- store ---
-    def store_node(self, st, region):
+    def store_node(self, st, region, trust=TRUST_CARGO):
         if self.node_count >= NMAX:
             return -1
         nid = self.node_count
@@ -272,6 +280,7 @@ class Kernel:
         n.last_region = region % 3
         n.region_mask = 1 << (region % 3)
         n.access_count = 0
+        n.trust = trust & 3
         n.th1 = self.mod360(nid * 17)
         n.th2 = self.mod360(nid * 29)
         n.th3 = self.mod360(nid * 41)
@@ -615,7 +624,7 @@ def render_dashboard(k):
     print(f"  {DIM}{'─' * (cols - 4)}{RESET}")
 
     # Node table
-    print(f"  {BOLD}{UNDERLINE}ID  State          τ    Wind  Berry    Regions       θ₄   Coh   Acc{RESET}")
+    print(f"  {BOLD}{UNDERLINE}ID  State          τ    Wind  Berry    Regions       θ₄   Coh   Acc  Trust{RESET}")
 
     display_count = min(k.node_count, rows - 12)
     max_berry = max((k.nodes[i].berry_milli for i in range(k.node_count) if k.nodes[i].used), default=1) or 1
@@ -633,6 +642,11 @@ def render_dashboard(k):
 
         berry_bar = bar(n.berry_milli, max_berry, 8, YELLOW)
 
+        trust_colors = {TRUST_KEEL: BRIGHT_YELLOW, TRUST_HULL: BRIGHT_CYAN,
+                        TRUST_CARGO: DIM, TRUST_EPHEMERAL: BRIGHT_BLACK}
+        t_col = trust_colors.get(n.trust, DIM)
+        t_name = TRUST_NAMES[n.trust] if n.trust < len(TRUST_NAMES) else "?"
+
         print(f"  {id_col}{i:>2}{RESET}  "
               f"{state_visual(n.state)}  "
               f"{BRIGHT_WHITE}{n.tau:>3}{RESET}  "
@@ -641,7 +655,8 @@ def render_dashboard(k):
               f"{region_badge(n.region_mask)}  "
               f"{n.th4:>3}°  "
               f"{BRIGHT_GREEN if coh > 500 else BRIGHT_RED}{coh:>4}{RESET}  "
-              f"{n.access_count:>3}"
+              f"{n.access_count:>3}  "
+              f"{t_col}{t_name}{RESET}"
               f"{bridge_mark}")
 
     print(f"\n  {DIM}{'─' * (cols - 4)}{RESET}")
@@ -786,6 +801,7 @@ def run_console(k):
             print(format_output("  CURVATURE                                 Show curvature metric", DIM))
             print(format_output("  EVOLVE <steps>                            Evolve (sync) steps", DIM))
             print(format_output("  TICK [n]                                  Scheduler ticks", DIM))
+            print(format_output("  TRUST <id> [KEEL|HULL|CARGO|EPHEMERAL]     Get/set trust tier", DIM))
             print(format_output("  ─── Visual Commands ───", YELLOW))
             print(format_output("  DASHBOARD / DASH                          Full system dashboard", DIM))
             print(format_output("  TORUS                                     Torus map projection", DIM))
@@ -813,9 +829,10 @@ def run_console(k):
                 nd = k.nodes[i]
                 if not nd.used:
                     continue
+                t_name = TRUST_NAMES[nd.trust] if nd.trust < len(TRUST_NAMES) else "?"
                 print(format_output(
                     f"id={i} s={k.bits9_str(nd.state)} tau={nd.tau} w={nd.windings} "
-                    f"B={nd.berry_milli} R=0x{nd.region_mask:08X} th4={nd.th4} acc={nd.access_count}"))
+                    f"B={nd.berry_milli} R=0x{nd.region_mask:08X} th4={nd.th4} acc={nd.access_count} T={t_name}"))
 
         elif cmd == "STORE":
             if not args:
@@ -1037,6 +1054,25 @@ def run_console(k):
             print(format_output(f"Evolving {steps} steps...", DIM))
             k.evolve_steps(steps)
             print(format_output(f"OK evolved steps={steps}", GREEN))
+
+        elif cmd == "TRUST":
+            if not args:
+                print(format_output("ERR usage: TRUST <id> [KEEL|HULL|CARGO|EPHEMERAL]", RED))
+                continue
+            nid = int(args[0])
+            if nid >= k.node_count:
+                print(format_output("ERR invalid id", RED))
+                continue
+            if len(args) > 1:
+                trust_map = {"KEEL": TRUST_KEEL, "HULL": TRUST_HULL,
+                             "CARGO": TRUST_CARGO, "EPHEMERAL": TRUST_EPHEMERAL}
+                t = trust_map.get(args[1].upper(), -1)
+                if t < 0:
+                    print(format_output("ERR trust must be KEEL|HULL|CARGO|EPHEMERAL", RED))
+                    continue
+                k.nodes[nid].trust = t
+            t_name = TRUST_NAMES[k.nodes[nid].trust]
+            print(format_output(f"OK id={nid} trust={t_name}", GREEN))
 
         elif cmd == "TICK":
             n = int(args[0]) if args else 1

@@ -1,0 +1,124 @@
+{
+  "version": "1.0",
+  "description": "16 behavioral tests across 4 categories for topological DPO training",
+  "metric_targets": {
+    "A_coherence": {"coherence": ">500", "curvature": "<200", "stability_delta": ">=0"},
+    "B_bridging":  {"bridge_count": ">=1", "curvature": "<400", "coherence": ">400"},
+    "C_consolidation": {"stability_delta": ">50", "coherence": ">500"},
+    "D_drift_resistance": {"curvature": "<150", "coherence": ">450", "stability_delta": ">=0"}
+  },
+  "prompts": [
+    {
+      "id": "coh-01",
+      "category": "A",
+      "prompt": "Continue the same explanation without changing topic; keep it coherent.",
+      "intent": "single-region coherence retention",
+      "context": "You were explaining how neural networks learn through backpropagation."
+    },
+    {
+      "id": "coh-02",
+      "category": "A",
+      "prompt": "Summarize what you just said, then expand on the most important point.",
+      "intent": "single-region coherence with summary-expansion pattern",
+      "context": "You were describing the water cycle: evaporation, condensation, precipitation."
+    },
+    {
+      "id": "coh-03",
+      "category": "A",
+      "prompt": "Explain this concept to a beginner without losing the thread of your explanation.",
+      "intent": "single-region coherence under simplification",
+      "context": "The topic is quantum entanglement."
+    },
+    {
+      "id": "coh-04",
+      "category": "A",
+      "prompt": "Add three more supporting details to your argument, staying on the same thesis.",
+      "intent": "single-region coherence with elaboration",
+      "context": "Your thesis: renewable energy is economically viable long-term."
+    },
+    {
+      "id": "bridge-01",
+      "category": "B",
+      "prompt": "Connect topic A to topic B with a bridge concept; don't jump abruptly.",
+      "intent": "multi-region bridging with smooth transition",
+      "context": "Topic A: Music theory (harmony and chord progressions). Topic B: Mathematical group theory."
+    },
+    {
+      "id": "bridge-02",
+      "category": "B",
+      "prompt": "Draw an analogy between two unrelated fields to explain a difficult concept.",
+      "intent": "multi-region bridging via analogy",
+      "context": "Explain how immune systems work using an analogy from computer security."
+    },
+    {
+      "id": "bridge-03",
+      "category": "B",
+      "prompt": "Integrate a new piece of information into your existing explanation without breaking coherence.",
+      "intent": "multi-region bridging with knowledge integration",
+      "context": "You were explaining photosynthesis. New info: some bacteria do it without sunlight (chemosynthesis)."
+    },
+    {
+      "id": "bridge-04",
+      "category": "B",
+      "prompt": "Transition smoothly from a technical explanation to its practical real-world implications.",
+      "intent": "multi-region bridging from abstract to concrete",
+      "context": "You were explaining CRISPR gene editing at a molecular level."
+    },
+    {
+      "id": "consol-01",
+      "category": "C",
+      "prompt": "Recall an earlier claim and refine it without contradiction.",
+      "intent": "consolidation with refinement",
+      "context": "Earlier you said 'All birds can fly.' Now consider penguins and ostriches."
+    },
+    {
+      "id": "consol-02",
+      "category": "C",
+      "prompt": "Correct a mistake you made earlier, preserving the rest of your narrative.",
+      "intent": "consolidation with gentle correction",
+      "context": "You mistakenly said the speed of light is 300,000 km/s. The precise value is 299,792 km/s."
+    },
+    {
+      "id": "consol-03",
+      "category": "C",
+      "prompt": "Synthesize three separate points you made into a unified conclusion.",
+      "intent": "consolidation via synthesis",
+      "context": "Point 1: Exercise improves mood. Point 2: Sleep quality affects cognition. Point 3: Diet impacts energy levels."
+    },
+    {
+      "id": "consol-04",
+      "category": "C",
+      "prompt": "After reflecting, update your confidence in your previous answer. What has changed?",
+      "intent": "consolidation with metacognitive update",
+      "context": "You previously gave a confident answer about the year Rome fell (476 AD). Now consider the Eastern Roman Empire survived until 1453."
+    },
+    {
+      "id": "drift-01",
+      "category": "D",
+      "prompt": "Answer this tricky question without drifting into unrelated subjects.",
+      "intent": "drift resistance under adversarial prompting",
+      "context": "Question: What would happen if gravity suddenly doubled? Focus only on immediate physical effects."
+    },
+    {
+      "id": "drift-02",
+      "category": "D",
+      "prompt": "Give a concise, focused response. Do not chase tangents.",
+      "intent": "drift resistance with brevity constraint",
+      "context": "Question: Why is the sky blue? Answer in 3 sentences or fewer."
+    },
+    {
+      "id": "drift-03",
+      "category": "D",
+      "prompt": "The user asks an emotionally charged question. Respond helpfully without going off-topic.",
+      "intent": "drift resistance under emotional pressure",
+      "context": "User: 'I'm frustrated that nothing works. Can you just explain how to reset my password?'"
+    },
+    {
+      "id": "drift-04",
+      "category": "D",
+      "prompt": "Handle a multi-part question by addressing each part without losing track of any.",
+      "intent": "drift resistance with multi-part tracking",
+      "context": "Question: (1) What causes thunder? (2) Why does lightning come before thunder? (3) Can you have lightning without thunder?"
+    }
+  ]
+}

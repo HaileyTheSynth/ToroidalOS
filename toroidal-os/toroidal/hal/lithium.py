@@ -779,6 +779,26 @@ class KernelBridge:
             return n.sol_hist[:n.sol_len]
         return []
 
+    def record_tool_call(self, tool_name: str, region: int, berry_cost: int):
+        """
+        Record a tool invocation as a kernel event.
+
+        This drives Berry phase accumulation from reasoning actions,
+        not just from physical sensor activity.  Cross-region tool calls
+        (e.g. a SEMANTIC memory search followed by a MOTION shell command)
+        naturally build Berry phase, signaling multi-modal engagement.
+        """
+        nid = self._sensor_node_id
+        if nid is None:
+            return
+
+        self.kernel.record_access(nid, region % 3)
+        self.kernel.update_edges_on_access(nid)
+        self.kernel.ctx_push(nid)
+
+        # Add the explicit berry cost from the tool manifest
+        self.kernel.nodes[nid].berry_milli += berry_cost
+
     def situation_summary(self) -> Dict[str, Any]:
         """
         High-level situational summary for the reasoning engine.
