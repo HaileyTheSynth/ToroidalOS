@@ -252,7 +252,7 @@ You can use tools by including <tool>{"name": "...", "args": {...}}</tool> block
                 self.graph.step()
         
         # Max iterations reached without convergence
-        final_response = prev_output or thoughts[-1] if thoughts else ""
+        final_response = prev_output if prev_output is not None else (thoughts[-1] if thoughts else "")
         result = ReasoningResult(
             response=final_response,
             iterations=effective_max_iter,
