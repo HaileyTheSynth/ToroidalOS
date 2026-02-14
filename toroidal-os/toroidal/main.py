@@ -21,7 +21,6 @@ import signal
 import subprocess
 import threading
 import argparse
-from pathlib import Path
 
 
 # Add parent directory to path
@@ -73,8 +72,8 @@ class LlamaServer:
         
         self.process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         
         # Wait for server to be ready
@@ -86,7 +85,11 @@ class LlamaServer:
         """Stop llama.cpp server"""
         if self.process:
             self.process.terminate()
-            self.process.wait()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=2)
             self.process = None
     
     def is_running(self) -> bool:
@@ -189,8 +192,8 @@ class DisplayHandler:
         try:
             with open(self.fb_device, 'wb') as fb:
                 fb.write(b'\x00' * (self.width * self.height * 4))
-        except:
-            pass
+        except OSError as exc:
+            print(f"[DISPLAY] Failed to clear framebuffer {self.fb_device}: {exc}")
     
     def draw_text(self, text: str, x: int = 50, y: int = 100):
         """Draw text on display (simplified - would need proper font rendering)"""
@@ -256,6 +259,8 @@ def main():
     llm_server = None
     audio_handler = None
     
+    exit_code = 0
+
     def shutdown(signum=None, frame=None):
         """Clean shutdown"""
         print("\n[TOROIDAL] Shutting down...")
@@ -263,7 +268,6 @@ def main():
             audio_handler.stop()
         if llm_server:
             llm_server.stop()
-        sys.exit(0)
     
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
@@ -305,11 +309,13 @@ def main():
         toroidal.run_repl()
         
     except Exception as e:
+        exit_code = 1
         print(f"[FATAL ERROR] {e}")
         import traceback
         traceback.print_exc()
     finally:
         shutdown()
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":

@@ -241,6 +241,12 @@ class ToolDispatcher:
         try:
             output = manifest.handler(call.args)
             success = True
+            if manifest.name == "shell" and str(output).startswith("[exit="):
+                try:
+                    exit_code = int(str(output).split("[exit=", 1)[1].split("]", 1)[0])
+                    success = exit_code == 0
+                except Exception:
+                    pass
         except Exception as e:
             output = f"Error: {str(e)}"
             success = False
@@ -450,10 +456,17 @@ class ToolDispatcher:
                 text=True,
                 timeout=10,
             )
-            output = result.stdout[:1000]
-            if result.returncode != 0:
-                output += f"\n[stderr]: {result.stderr[:500]}"
-            return output or "(no output)"
+            stdout = (result.stdout or "")[:1000]
+            stderr = (result.stderr or "")[:500]
+            status = f"exit={result.returncode}"
+
+            if stdout and stderr:
+                return f"[{status}]\n{stdout}\n[stderr]\n{stderr}"
+            if stdout:
+                return f"[{status}]\n{stdout}"
+            if stderr:
+                return f"[{status}]\n[stderr]\n{stderr}"
+            return f"[{status}] (no output)"
         except subprocess.TimeoutExpired:
             return "Command timed out (10s limit)"
         except Exception as e:
