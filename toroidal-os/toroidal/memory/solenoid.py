@@ -19,8 +19,12 @@ import time
 import hashlib
 from collections import deque
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, TYPE_CHECKING
 import threading
+import numpy as np
+
+if TYPE_CHECKING:
+    from toroidal.embeddings import OctenEmbeddingService, EmbeddingCache
 
 
 @dataclass
@@ -87,32 +91,42 @@ class SolenoidLevel:
 class SolenoidMemory:
     """
     Multi-scale hierarchical memory system.
-    
+
     Memory flows upward through compression:
     Raw → Summarized → Abstracted → Core
-    
+
     This mirrors the nested torus structure of a solenoid,
     where each level wraps around and contains the essence
     of the level below.
+
+    Supports semantic search when embedding_service is provided.
     """
-    
+
     def __init__(
         self,
         num_levels: int = 4,
         compression_ratio: int = 8,
-        compressor: Callable = None
+        compressor: Callable = None,
+        embedding_service: "OctenEmbeddingService" = None,
+        embedding_cache: "EmbeddingCache" = None
     ):
         """
         Initialize solenoid memory.
-        
+
         Args:
             num_levels: Number of hierarchy levels
             compression_ratio: Items at level N compress to 1 at level N+1
             compressor: Function to compress items (uses LLM if provided)
+            embedding_service: Optional embedding service for semantic search
+            embedding_cache: Optional cache for embeddings
         """
         self.num_levels = num_levels
         self.compression_ratio = compression_ratio
         self.compressor = compressor or self._default_compressor
+
+        # Embedding support for semantic search
+        self.embedding_service = embedding_service
+        self.embedding_cache = embedding_cache
         
         # Level sizes (smaller at higher levels)
         # For 6GB Mi Mix: ~50MB total for memory
@@ -154,24 +168,43 @@ class SolenoidMemory:
     def wind(self, content: str, importance: float = 1.0, level: int = 0) -> MemoryItem:
         """
         Add content to memory, compressing upward as needed.
-        
-        "Wind" refers to the winding number in topology - 
+
+        "Wind" refers to the winding number in topology -
         each addition winds the memory tighter.
+
+        If embedding_service is available, generates and stores
+        embeddings for semantic search.
         """
         with self._lock:
+            # Generate embedding if service available
+            embedding = None
+            if self.embedding_service:
+                try:
+                    if self.embedding_cache:
+                        embedding = self.embedding_cache.get_or_compute(
+                            content,
+                            self.embedding_service.encode
+                        ).tolist()
+                    else:
+                        embedding = self.embedding_service.encode(content).tolist()
+                except Exception:
+                    # Embedding generation failed, continue without
+                    pass
+
             # Create new item at specified level
             item = MemoryItem(
                 id=self._generate_id(),
                 content=content,
                 level=level,
-                importance=importance
+                importance=importance,
+                embedding=embedding
             )
-            
+
             self.levels[level].add(item)
-            
+
             # Check if compression is needed
             self._maybe_compress(level)
-            
+
             return item
     
     def _maybe_compress(self, level: int):
@@ -251,23 +284,107 @@ class SolenoidMemory:
         else:
             return f"{int(seconds/86400)}d ago"
     
-    def search(self, query: str, levels: List[int] = None) -> List[MemoryItem]:
-        """Search across memory levels"""
+    def search(
+        self,
+        query: str,
+        levels: List[int] = None,
+        use_semantic: bool = True,
+        top_k: int = 10,
+        threshold: float = 0.5
+    ) -> List[MemoryItem]:
+        """
+        Search across memory levels.
+
+        Args:
+            query: Search query
+            levels: Memory levels to search (None = all)
+            use_semantic: Use semantic search if embedding_service available
+            top_k: Maximum results to return for semantic search
+            threshold: Minimum similarity threshold for semantic search
+
+        Returns:
+            List of matching MemoryItems, sorted by relevance
+        """
         if levels is None:
             levels = list(range(self.num_levels))
-        
-        results = []
+
+        # Collect all items from specified levels
+        all_items = []
         for level_idx in levels:
             if level_idx < len(self.levels):
-                results.extend(self.levels[level_idx].search(query))
-        
-        # Sort by relevance (simple: importance * recency)
+                all_items.extend(self.levels[level_idx].get_all())
+
+        # Use semantic search if available and requested
+        if use_semantic and self.embedding_service:
+            return self._semantic_search(query, all_items, top_k, threshold)
+
+        # Fallback to keyword search
+        results = []
+        query_lower = query.lower()
+        for item in all_items:
+            if query_lower in item.content.lower():
+                item.touch()
+                results.append(item)
+
+        # Sort by relevance (importance * recency)
         results.sort(
             key=lambda x: x.importance * (1.0 / (time.time() - x.timestamp + 1)),
             reverse=True
         )
-        
-        return results
+
+        return results[:top_k] if top_k else results
+
+    def _semantic_search(
+        self,
+        query: str,
+        items: List[MemoryItem],
+        top_k: int,
+        threshold: float
+    ) -> List[MemoryItem]:
+        """Perform semantic search using embeddings."""
+        if not items:
+            return []
+
+        try:
+            # Get query embedding
+            query_embedding = self.embedding_service.encode(query)
+
+            # Compute similarities
+            from toroidal.embeddings.utils import cosine_similarity
+
+            candidates = []
+            for item in items:
+                if item.embedding:
+                    item_embedding = np.array(item.embedding)
+                    sim = cosine_similarity(query_embedding, item_embedding)
+                    if sim >= threshold:
+                        item.touch()
+                        candidates.append((item, sim))
+
+            # Sort by similarity
+            candidates.sort(key=lambda x: x[1], reverse=True)
+
+            return [item for item, _ in candidates[:top_k]]
+
+        except Exception:
+            # Semantic search failed, fall back to keyword
+            return self._keyword_search(query, items, top_k)
+
+    def _keyword_search(self, query: str, items: List[MemoryItem], top_k: int) -> List[MemoryItem]:
+        """Fallback keyword search."""
+        results = []
+        query_lower = query.lower()
+        for item in items:
+            if query_lower in item.content.lower():
+                item.touch()
+                results.append(item)
+
+        results.sort(
+            key=lambda x: x.importance * (1.0 / (time.time() - x.timestamp + 1)),
+            reverse=True
+        )
+
+        return results[:top_k] if top_k else results
     
     def get_core_beliefs(self) -> List[MemoryItem]:
         """Get items from the highest (core) level"""

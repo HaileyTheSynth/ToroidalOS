@@ -40,7 +40,7 @@ The detector uses signals from:
 import time
 import re
 from enum import Enum
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Callable, Callable
 from dataclasses import dataclass, field
 
 

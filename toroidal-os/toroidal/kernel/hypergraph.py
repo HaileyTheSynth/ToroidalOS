@@ -516,31 +516,71 @@ def create_process(graph: HypergraphKernel, name: str, handler: Callable = None)
     return proc
 
 
-def create_thought(graph: HypergraphKernel, content: str, source: str = None) -> Node:
-    """Record a thought in the graph"""
+def create_thought(
+    graph: HypergraphKernel,
+    content: str,
+    source: str = None,
+    embedding: list = None
+) -> Node:
+    """
+    Record a thought in the graph.
+
+    Args:
+        graph: The hypergraph kernel
+        content: Thought content
+        source: Optional source node ID
+        embedding: Optional embedding vector for semantic search
+
+    Returns:
+        The created thought node
+    """
     thought_id = f"thought_{graph.tau}"
-    thought = graph.add_node(thought_id, NodeType.THOUGHT, {
+    data = {
         "content": content,
         "source": source,
         "created_at": time.time()
-    })
-    
+    }
+    if embedding is not None:
+        data["embedding"] = embedding
+
+    thought = graph.add_node(thought_id, NodeType.THOUGHT, data)
+
     # Connect to source if provided
     if source and source in graph.nodes:
         graph.add_edge(source, thought_id, "generated")
-    
+
     return thought
 
 
-def create_percept(graph: HypergraphKernel, modality: str, data: Any) -> Node:
-    """Record a perception (sensor input) in the graph"""
+def create_percept(
+    graph: HypergraphKernel,
+    modality: str,
+    data: Any,
+    embedding: list = None
+) -> Node:
+    """
+    Record a perception (sensor input) in the graph.
+
+    Args:
+        graph: The hypergraph kernel
+        modality: Input modality ("audio", "vision", "text", "touch")
+        data: Perception data
+        embedding: Optional embedding vector for semantic search
+
+    Returns:
+        The created percept node
+    """
     percept_id = f"percept_{graph.tau}_{modality}"
-    percept = graph.add_node(percept_id, NodeType.PERCEPT, {
-        "modality": modality,  # "audio", "vision", "text", "touch"
+    node_data = {
+        "modality": modality,
         "data": data,
         "timestamp": time.time()
-    })
-    
+    }
+    if embedding is not None:
+        node_data["embedding"] = embedding
+
+    percept = graph.add_node(percept_id, NodeType.PERCEPT, node_data)
+
     return percept
 
 

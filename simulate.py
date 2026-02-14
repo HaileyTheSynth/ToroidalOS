@@ -799,9 +799,11 @@ def run_console(k):
             print(format_output("  HEDGE LIST                                List hyperedges", DIM))
             print(format_output("  HEDGE DEL <eid>                           Delete hyperedge", DIM))
             print(format_output("  CURVATURE                                 Show curvature metric", DIM))
-            print(format_output("  EVOLVE <steps>                            Evolve (sync) steps", DIM))
+            print(format_output("  EVOLVE <steps> [TUFT]                     Evolve (sync) steps, TUFT uses Barnes-Hut", DIM))
             print(format_output("  TICK [n]                                  Scheduler ticks", DIM))
             print(format_output("  TRUST <id> [KEEL|HULL|CARGO|EPHEMERAL]     Get/set trust tier", DIM))
+            print(format_output("  TUFTTICK [n]                              TUFT dynamics tick with Barnes-Hut forces", DIM))
+            print(format_output("  TUFTSTATS                                 Show TUFT-specific statistics", DIM))
             print(format_output("  ─── Visual Commands ───", YELLOW))
             print(format_output("  DASHBOARD / DASH                          Full system dashboard", DIM))
             print(format_output("  TORUS                                     Torus map projection", DIM))
@@ -1045,15 +1047,38 @@ def run_console(k):
 
         elif cmd == "EVOLVE":
             if not args:
-                print(format_output("ERR usage: EVOLVE <steps>", RED))
+                print(format_output("ERR usage: EVOLVE <steps> [TUFT]", RED))
                 continue
             steps = int(args[0])
             if steps <= 0:
                 print(format_output("ERR steps must be > 0", RED))
                 continue
-            print(format_output(f"Evolving {steps} steps...", DIM))
-            k.evolve_steps(steps)
-            print(format_output(f"OK evolved steps={steps}", GREEN))
+            use_tuft = len(args) > 1 and args[1].upper() == "TUFT"
+            print(format_output(f"Evolving {steps} steps{' (TUFT mode)' if use_tuft else ''}...", DIM))
+            if use_tuft:
+                # Lazy import to avoid circular dependency
+                try:
+                    from topo9_tuft_dynamics import Topo9TUFT
+                    # Convert kernel to TUFT kernel
+                    tuft_k = Topo9TUFT()
+                    tuft_k.nodes = k.nodes
+                    tuft_k.node_count = k.node_count
+                    tuft_k.hedges = k.hedges
+                    tuft_k.hedge_count = k.hedge_count
+                    tuft_k.edge_w = k.edge_w
+                    tuft_k.ctx_ring = k.ctx_ring
+                    tuft_k.ctx_len = k.ctx_len
+                    tuft_k.ctx_head = k.ctx_head
+                    tuft_k.tuft_evolve_step(steps)
+                    k.nodes = tuft_k.nodes
+                    print(format_output(f"OK TUFT evolved steps={steps}", GREEN))
+                except ImportError as e:
+                    print(format_output(f"ERR TUFT mode unavailable: {e}", RED))
+                    k.evolve_steps(steps)
+                    print(format_output(f"OK evolved steps={steps}", GREEN))
+            else:
+                k.evolve_steps(steps)
+                print(format_output(f"OK evolved steps={steps}", GREEN))
 
         elif cmd == "TRUST":
             if not args:
@@ -1087,6 +1112,60 @@ def run_console(k):
                     f"tau={r['tau']} w={r['windings']} "
                     f"B={r['berry']} th4={r['th4']} "
                     f"{coh_color}coh={r['coh']}{RESET} curv={r['curv']}"))
+
+        elif cmd == "TUFTTICK":
+            n = int(args[0]) if args else 1
+            n = max(1, min(n, 100))
+            print(format_output(f"Running {n} TUFT tick(s) with Barnes-Hut forces...", DIM))
+            try:
+                from topo9_tuft_dynamics import Topo9TUFT
+                tuft_k = Topo9TUFT()
+                tuft_k.nodes = k.nodes
+                tuft_k.node_count = k.node_count
+                tuft_k.hedges = k.hedges
+                tuft_k.hedge_count = k.hedge_count
+                tuft_k.edge_w = k.edge_w
+                tuft_k.ctx_ring = k.ctx_ring
+                tuft_k.ctx_len = k.ctx_len
+                tuft_k.ctx_head = k.ctx_head
+                results = tuft_k.tuft_tick(n)
+                k.nodes = tuft_k.nodes
+                for r in results:
+                    coh_color = BRIGHT_GREEN if r["coh"] > 500 else BRIGHT_RED
+                    vel_mag = sum(v**2 for v in r["velocity"])**0.5
+                    print(format_output(
+                        f"TUFTTICK t={r['t']} id={r['id']} "
+                        f"th4={r['th4']:.1f}° w={r['windings']} "
+                        f"B={r['berry']} vel={vel_mag:.3f} "
+                        f"{coh_color}coh={r['coh']}{RESET}"))
+                print(format_output(f"OK TUFT tick completed", GREEN))
+            except ImportError as e:
+                print(format_output(f"ERR TUFT unavailable: {e}", RED))
+
+        elif cmd == "TUFTSTATS":
+            try:
+                from topo9_tuft_dynamics import Topo9TUFT
+                tuft_k = Topo9TUFT()
+                tuft_k.nodes = k.nodes
+                tuft_k.node_count = k.node_count
+                tuft_k.hedges = k.hedges
+                tuft_k.hedge_count = k.hedge_count
+                tuft_k.edge_w = k.edge_w
+                tuft_k.ctx_ring = k.ctx_ring
+                tuft_k.ctx_len = k.ctx_len
+                tuft_k.ctx_head = k.ctx_head
+                tuft_k.update_entropy_field()
+                tuft_k.build_barnes_hut_tree()
+                tuft_k.compute_wilson_loops()
+                stats = tuft_k.get_tuft_stats()
+                print(format_output("TUFT STATISTICS:", BRIGHT_CYAN))
+                for key, value in stats.items():
+                    if isinstance(value, float):
+                        print(format_output(f"  {key}: {value:.4f}", DIM))
+                    else:
+                        print(format_output(f"  {key}: {value}", DIM))
+            except ImportError as e:
+                print(format_output(f"ERR TUFT unavailable: {e}", RED))
 
         else:
             print(format_output(f"ERR unknown command '{cmd}' (try HELP)", RED))

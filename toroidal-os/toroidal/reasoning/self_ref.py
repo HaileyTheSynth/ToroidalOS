@@ -30,6 +30,9 @@ from memory.solenoid import SolenoidMemory, LLMCompressor
 from reasoning.tools import ToolDispatcher, parse_tool_calls, ToolResult
 from reasoning.topo_protocol import TopoProtocol
 from reasoning.epistemic import EpistemicDetector, create_epistemic_prerequisite
+from reasoning.desire import DesireField
+from reasoning.dream import DreamCycle
+from reasoning.online_dpo import OnlineDPO
 
 
 class ConvergenceState(Enum):
@@ -130,7 +133,9 @@ class SelfReferentialEngine:
         max_iterations: int = 5,
         convergence_threshold: float = 0.9,
         kernel_bridge=None,
-        tool_dispatcher: ToolDispatcher = None
+        tool_dispatcher: ToolDispatcher = None,
+        online_dpo: OnlineDPO = None,
+        embedding_service=None,
     ):
         self.graph = graph
         self.memory = memory
@@ -139,6 +144,8 @@ class SelfReferentialEngine:
         self.convergence_threshold = convergence_threshold
         self.bridge = kernel_bridge
         self.tools = tool_dispatcher
+        self.dpo = online_dpo
+        self.embedding_service = embedding_service
 
         # System prompt for self-referential reasoning
         self.system_prompt = """You are TOROIDAL, a self-referential AI running on a Xiaomi Mi Mix.
@@ -165,19 +172,33 @@ You can use tools by including <tool>{"name": "...", "args": {...}}</tool> block
         start_time = time.time()
         thoughts = []
         prev_output = None
-        
+
+        # DPO: snapshot kernel metrics BEFORE reasoning
+        if self.dpo:
+            self.dpo.snapshot_pre()
+
+        # DPO: adjust parameters based on learned biases
+        effective_max_iter = self.max_iterations
+        effective_temp = 0.7
+        if self.dpo:
+            effective_max_iter = self.dpo.get_max_iterations(self.max_iterations)
+            effective_temp = self.dpo.get_temperature()
+
         # Record input as percept
         percept = create_percept(self.graph, "text", input_data)
-        
-        tool_results_text = ""
 
-        for iteration in range(self.max_iterations):
+        tool_results_text = ""
+        tool_call_count = 0
+        tool_success_count = 0
+
+        for iteration in range(effective_max_iter):
             # Build prompt with self-referential components
             prompt = self._build_prompt(input_data, prev_output, iteration, context,
                                         tool_results=tool_results_text)
 
-            # Generate thought via LLM
-            output = self.llm.complete(prompt, max_tokens=200)
+            # Generate thought via LLM (with DPO-adjusted temperature)
+            output = self.llm.complete(prompt, max_tokens=200,
+                                       temperature=effective_temp)
 
             # Parse and dispatch any tool calls embedded in the output
             clean_output, tool_calls = parse_tool_calls(output)
@@ -185,6 +206,8 @@ You can use tools by including <tool>{"name": "...", "args": {...}}</tool> block
             if tool_calls and self.tools:
                 results = self.tools.dispatch_all(tool_calls)
                 tool_results_text = self.tools.format_results(results)
+                tool_call_count += len(tool_calls)
+                tool_success_count += sum(1 for r in results if r.success)
                 # Append tool results summary to the thought record
                 clean_output += f"\n[Used {len(tool_calls)} tool(s)]"
 
@@ -199,7 +222,7 @@ You can use tools by including <tool>{"name": "...", "args": {...}}</tool> block
             # Check for explicit convergence marker
             if "CONVERGED:" in clean_output:
                 final = clean_output.split("CONVERGED:")[-1].strip()
-                return ReasoningResult(
+                result = ReasoningResult(
                     response=final,
                     iterations=iteration + 1,
                     convergence=ConvergenceState.CONVERGED,
@@ -207,10 +230,12 @@ You can use tools by including <tool>{"name": "...", "args": {...}}</tool> block
                     thoughts=thoughts,
                     elapsed_time=time.time() - start_time
                 )
+                self._record_dpo(input_data, final, result, tool_call_count, tool_success_count)
+                return result
 
             # Check for implicit convergence (similar to previous)
             if prev_output and self._similar(clean_output, prev_output):
-                return ReasoningResult(
+                result = ReasoningResult(
                     response=clean_output,
                     iterations=iteration + 1,
                     convergence=ConvergenceState.CONVERGED,
@@ -218,6 +243,8 @@ You can use tools by including <tool>{"name": "...", "args": {...}}</tool> block
                     thoughts=thoughts,
                     elapsed_time=time.time() - start_time
                 )
+                self._record_dpo(input_data, clean_output, result, tool_call_count, tool_success_count)
+                return result
 
             prev_output = clean_output
 
@@ -227,15 +254,40 @@ You can use tools by including <tool>{"name": "...", "args": {...}}</tool> block
                 self.graph.step()
         
         # Max iterations reached without convergence
-        return ReasoningResult(
-            response=prev_output or thoughts[-1] if thoughts else "",
-            iterations=self.max_iterations,
+        final_response = prev_output if prev_output is not None else (thoughts[-1] if thoughts else "")
+        result = ReasoningResult(
+            response=final_response,
+            iterations=effective_max_iter,
             convergence=ConvergenceState.TIMEOUT,
             confidence=0.5,
             thoughts=thoughts,
             elapsed_time=time.time() - start_time
         )
+        self._record_dpo(input_data, final_response, result, tool_call_count, tool_success_count)
+        return result
     
+    def _record_dpo(self, prompt: str, response: str, result: ReasoningResult,
+                     tool_calls: int, tool_successes: int):
+        """Record experience in the online DPO system."""
+        if not self.dpo:
+            return
+        try:
+            reward = self.dpo.compute_reward(
+                iterations=result.iterations,
+                max_iterations=self.max_iterations,
+                tool_calls=tool_calls,
+                tool_successes=tool_successes,
+            )
+            self.dpo.record_experience(
+                prompt=prompt,
+                response=response,
+                reward=reward,
+                iterations=result.iterations,
+                tools_used=[],
+            )
+        except Exception:
+            pass  # Don't let DPO errors affect reasoning
+
     def _build_prompt(
         self,
         input_data: str,
@@ -318,17 +370,33 @@ You can use tools by including <tool>{"name": "...", "args": {...}}</tool> block
         return self._similarity(a, b) >= threshold
     
     def _similarity(self, a: str, b: str) -> float:
-        """Calculate similarity between two strings (0-1)"""
-        # Simple word overlap similarity
+        """
+        Calculate similarity between two strings (0-1).
+
+        Uses embedding cosine similarity if embedding_service is available,
+        otherwise falls back to word overlap similarity.
+        """
+        # Use embedding similarity if available
+        if self.embedding_service:
+            try:
+                from toroidal.embeddings.utils import cosine_similarity
+                import numpy as np
+                emb_a = self.embedding_service.encode(a)
+                emb_b = self.embedding_service.encode(b)
+                return cosine_similarity(emb_a, emb_b)
+            except Exception:
+                pass  # Fall back to word overlap
+
+        # Fallback: simple word overlap similarity (Jaccard)
         words_a = set(a.lower().split())
         words_b = set(b.lower().split())
-        
+
         if not words_a or not words_b:
             return 0.0
-        
+
         intersection = len(words_a & words_b)
         union = len(words_a | words_b)
-        
+
         return intersection / union if union > 0 else 0.0
     
     def quick_respond(self, input_data: str) -> str:
@@ -445,20 +513,46 @@ class ToroidalOS:
         llm_endpoint: str = "http://localhost:8080",
         max_nodes: int = 5000,
         memory_levels: int = 4,
-        kernel_bridge=None
+        kernel_bridge=None,
+        embedding_config=None,
+        enable_embeddings: bool = True
     ):
         print("[TOROIDAL] Initializing...")
 
         # Initialize LLM client
         self.llm = LLMClient(endpoint=llm_endpoint)
 
+        # Initialize embedding service if enabled
+        self.embedding_service = None
+        self.embedding_cache = None
+        self.torus_mapper = None
+
+        if enable_embeddings:
+            try:
+                from toroidal.embeddings import (
+                    OctenEmbeddingService,
+                    EmbeddingCache,
+                    EmbeddingToTorusMapper,
+                    EmbeddingConfig,
+                )
+                config = embedding_config or EmbeddingConfig(lazy_load=True)
+                self.embedding_service = OctenEmbeddingService(config)
+                self.embedding_cache = EmbeddingCache(config)
+                self.torus_mapper = EmbeddingToTorusMapper(config)
+                print("[TOROIDAL] Embedding service initialized (lazy load)")
+            except ImportError as e:
+                print(f"[TOROIDAL] Embeddings not available: {e}")
+                enable_embeddings = False
+
         # Initialize hypergraph kernel
         self.graph = HypergraphKernel(max_nodes=max_nodes)
 
-        # Initialize solenoid memory with LLM compression
+        # Initialize solenoid memory with LLM compression and embeddings
         self.memory = SolenoidMemory(
             num_levels=memory_levels,
-            compressor=LLMCompressor(self.llm) if self.llm.is_available() else None
+            compressor=LLMCompressor(self.llm) if self.llm.is_available() else None,
+            embedding_service=self.embedding_service,
+            embedding_cache=self.embedding_cache
         )
 
         # Store kernel bridge reference
@@ -493,13 +587,40 @@ class ToroidalOS:
             if loaded:
                 print(f"[TOROIDAL] Loaded {len(loaded)} tools via topo:// protocol")
 
-        # Initialize reasoning engine with bridge and tools
+        # ── Tier 4: Autonomy & Self-Improvement ──
+
+        # Desire field: internal goals with Berry phase pressure
+        self.desire = DesireField(
+            graph=self.graph,
+            memory=self.memory,
+            kernel_bridge=self.bridge,
+        )
+
+        # Dream cycle: periodic solenoid history clustering
+        self.dream = DreamCycle(
+            graph=self.graph,
+            memory=self.memory,
+            kernel_bridge=self.bridge,
+            desire_field=self.desire,
+        )
+
+        # Online DPO: closed-loop training signal from kernel metrics
+        self.dpo = OnlineDPO(
+            graph=self.graph,
+            memory=self.memory,
+            kernel_bridge=self.bridge,
+            desire_field=self.desire,
+        )
+
+        # Initialize reasoning engine with bridge, tools, and DPO
         self.reasoner = SelfReferentialEngine(
             graph=self.graph,
             memory=self.memory,
             llm=self.llm,
             kernel_bridge=self.bridge,
             tool_dispatcher=self.tools,
+            online_dpo=self.dpo,
+            embedding_service=self.embedding_service,
         )
 
         # Initialize perception
@@ -511,7 +632,7 @@ class ToroidalOS:
         # Inject core beliefs
         self._initialize_beliefs()
 
-        print("[TOROIDAL] Ready.")
+        print("[TOROIDAL] Ready. (Tier 4: desire field, dream cycle, online DPO active)")
     
     def _initialize_beliefs(self):
         """Initialize core beliefs in memory and hypergraph.
@@ -542,27 +663,48 @@ class ToroidalOS:
     def process(self, input_text: str) -> str:
         """
         Main processing loop.
-        
+
         1. Perceive input
-        2. Reason with self-reference
-        3. Act on result
+        2. Run desire field cycle (may generate autonomous thoughts)
+        3. Reason with self-reference
+        4. Act on result
+        5. Periodically dream (pattern mining)
+        6. Periodically update DPO biases
         """
         # Perceive
         self.perception.perceive_text(input_text)
-        
+
+        # Desire field: check for autonomous thoughts before user response
+        if self.desire.should_cycle():
+            auto_thoughts = self.desire.cycle()
+            for thought in auto_thoughts:
+                # Process autonomous thoughts in the background
+                self.memory.wind(f"[Autonomous] {thought.prompt[:150]}", importance=0.8)
+
         # Decide: quick response or full reasoning?
         if self._is_simple_query(input_text):
             response = self.reasoner.quick_respond(input_text)
         else:
             result = self.reasoner.think(input_text)
             response = result.response
-            
+
             # Log reasoning metadata
             print(f"[Iterations: {result.iterations}, Convergence: {result.convergence.value}]")
-        
+
         # Output
         self.action.display(response)
-        
+
+        # Dream cycle: consolidate if enough idle time has passed
+        if self.dream.should_dream():
+            report = self.dream.dream()
+            if report.insights:
+                print(f"[Dream #{report.cycle_number}] {len(report.insights)} insight(s)")
+
+        # DPO: periodically construct preference pairs and update biases
+        if len(self.dpo.experiences) >= 10 and len(self.dpo.experiences) % 5 == 0:
+            self.dpo.construct_pairs()
+            self.dpo.update_biases()
+
         return response
     
     def _is_simple_query(self, text: str) -> bool:
@@ -649,6 +791,32 @@ class ToroidalOS:
         print("\nMemory Stats:")
         for level in self.memory.get_stats()["levels"]:
             print(f"  {level['name']}: {level['items']}/{level['max_items']}")
+
+        # Tier 4: Desire Field
+        if hasattr(self, 'desire'):
+            pressure = self.desire.get_pressure_summary()
+            print(f"\nDesire Field ({pressure['cycle_count']} cycles, "
+                  f"{pressure['queued_thoughts']} queued):")
+            for g in pressure['goals'][:4]:
+                bar = '█' * int(g['pressure'] * 20) + '░' * (20 - int(g['pressure'] * 20))
+                print(f"  {g['id'][:20]:20s} [{bar}] {g['pressure']:.2f} ({g['state']})")
+
+        # Tier 4: Dream Cycle
+        if hasattr(self, 'dream'):
+            ds = self.dream.get_dream_summary()
+            print(f"\nDream Cycle ({ds['total_dreams']} dreams, "
+                  f"{ds['archetypes']} archetypes, "
+                  f"{ds['cross_patterns']} cross-patterns)")
+
+        # Tier 4: Online DPO
+        if hasattr(self, 'dpo'):
+            dpo_s = self.dpo.get_status()
+            print(f"\nOnline DPO ({dpo_s['experiences']} exp, "
+                  f"{dpo_s['preference_pairs']} pairs, "
+                  f"avg reward: {dpo_s['avg_recent_reward']:.3f}):")
+            for bname, bval in dpo_s['biases'].items():
+                print(f"  {bname}: {bval}")
+
         print("="*40 + "\n")
 
 
