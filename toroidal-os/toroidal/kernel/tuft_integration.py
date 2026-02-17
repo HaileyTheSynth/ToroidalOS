@@ -422,9 +422,11 @@ class TUFTHypergraphKernel(HypergraphKernel):
             else:
                 force = np.zeros(4)
 
-            # Update velocity
+            # Update velocity with semantic coherence term
+            coh = self.compute_coherence(node_id)
+            coherence_boost = 1.0 + 0.2 * coh  # Coherent nodes move more confidently
             berry_factor = np.log1p(berry) / 10.0 + 0.1
-            vel = self.damping * vel + force * self.force_scale * berry_factor
+            vel = self.damping * vel + force * self.force_scale * berry_factor * coherence_boost
             self._velocities[node_id] = vel
 
             # Update position (toroidal)
@@ -436,6 +438,84 @@ class TUFTHypergraphKernel(HypergraphKernel):
             if pos[3] < old_th4 and vel[3] > 0:
                 if node_id in self._berry:
                     self._berry[node_id] += 1.0
+
+    def compute_wilson_loops(self) -> Dict[str, Any]:
+        """
+        Compute Wilson loop observables for topological analysis.
+
+        Wilson loops measure the holonomy (phase change) when parallel
+        transporting a vector around closed loops on the torus.
+
+        Returns:
+            Dictionary with Wilson loop statistics
+        """
+        if not self._torus_positions or len(self._torus_positions) < 3:
+            return {"wilson_loops": 0, "avg_holonomy": 0.0}
+
+        loops = []
+        total_holonomy = 0.0
+
+        # Find triangular loops via hyperedges
+        for he in self.hyperedges.values():
+            if not he.nodes or len(he.nodes) < 3:
+                continue
+
+            node_ids = list(he.nodes)[:4]  # Consider up to 4 nodes per hyperedge
+
+            # Compute holonomy for each triangular path
+            for i in range(len(node_ids)):
+                for j in range(i + 1, len(node_ids)):
+                    for k in range(j + 1, len(node_ids)):
+                        ids = [node_ids[i], node_ids[j], node_ids[k]]
+                        if all(nid in self._torus_positions for nid in ids):
+                            holonomy = self._compute_loop_holonomy(ids)
+                            loops.append({
+                                "nodes": ids,
+                                "holonomy": holonomy,
+                            })
+                            total_holonomy += holonomy
+
+        return {
+            "wilson_loops": len(loops),
+            "avg_holonomy": total_holonomy / len(loops) if loops else 0.0,
+            "max_holonomy": max((l["holonomy"] for l in loops), default=0.0),
+            "min_holonomy": min((l["holonomy"] for l in loops), default=0.0),
+        }
+
+    def _compute_loop_holonomy(self, node_ids: List[str]) -> float:
+        """
+        Compute holonomy for a closed loop of nodes.
+
+        Holonomy measures the accumulated phase change around the loop.
+        Large holonomy indicates topological tension/defect.
+
+        Args:
+            node_ids: List of node IDs forming the loop
+
+        Returns:
+            Holonomy value (0 = no tension, higher = more tension)
+        """
+        if len(node_ids) < 3:
+            return 0.0
+
+        positions = [self._torus_positions[nid] for nid in node_ids if nid in self._torus_positions]
+        if len(positions) < 3:
+            return 0.0
+
+        # Compute angular differences around the loop
+        total_angle = 0.0
+        for i in range(len(positions)):
+            pos1 = positions[i]
+            pos2 = positions[(i + 1) % len(positions)]
+
+            # Angular difference with torus wrapping
+            diff = np.abs(pos1 - pos2)
+            diff = np.where(diff > 180, 360 - diff, diff)
+            total_angle += np.sqrt(np.sum(diff ** 2)) / 360.0 * 2 * np.pi
+
+        # Holonomy is deviation from expected 2*pi for flat space
+        holonomy = abs(total_angle - 2 * np.pi)
+        return holonomy
 
     def _update_entropy_field(self):
         """Update entropy field from node states"""
@@ -501,12 +581,18 @@ class TUFTHypergraphKernel(HypergraphKernel):
         # Add TUFT dynamics
         self.tuft_step()
 
-        # Update Berry phases based on access
+        # Update Berry phases based on access and coherence
         for node_id, node in self.nodes.items():
             if node.access_count > 0:
-                # Berry phase accumulates with access
+                coh = self.compute_coherence(node_id)
+                # Berry phase accumulates faster for coherent, frequently accessed nodes
+                coherence_bonus = 1.0 + 0.5 * coh
                 if node_id in self._berry:
-                    self._berry[node_id] += 0.1 * node.energy
+                    self._berry[node_id] += 0.1 * node.energy * coherence_bonus
+
+    def get_wilson_loop_stats(self) -> Dict[str, Any]:
+        """Get Wilson loop topological statistics."""
+        return self.compute_wilson_loops()
 
     def get_tuft_stats(self) -> Dict[str, Any]:
         """Get TUFT-specific statistics"""
@@ -526,7 +612,94 @@ class TUFTHypergraphKernel(HypergraphKernel):
             stats["entropy_max"] = float(np.max(S))
             stats["entropy_mean"] = float(np.mean(S))
 
+        # Enhanced metrics
+        if self._embeddings:
+            stats["nodes_with_embeddings"] = len(self._embeddings)
+            stats["embedding_coverage"] = len(self._embeddings) / len(self.nodes) if self.nodes else 0
+
+        # Compute average coherence
+        coherence_scores = [self.compute_coherence(nid) for nid in list(self.nodes.keys())[:10]]
+        if coherence_scores:
+            stats["avg_coherence"] = float(np.mean(coherence_scores))
+            stats["coherence_std"] = float(np.std(coherence_scores))
+
+        # Torus position statistics
+        if self._torus_positions:
+            positions = np.array(list(self._torus_positions.values()))
+            stats["torus_spread"] = float(np.mean(np.std(positions, axis=0)))
+            stats["avg_velocity"] = float(np.mean([np.linalg.norm(v) for v in self._velocities.values()]))
+
         return stats
+
+    def get_semantic_clusters(self, distance_threshold: float = 60.0) -> List[List[str]]:
+        """
+        Find semantic clusters based on torus proximity.
+
+        Uses a simple distance-based clustering algorithm.
+
+        Args:
+            distance_threshold: Maximum torus distance for cluster membership
+
+        Returns:
+            List of clusters, where each cluster is a list of node IDs
+        """
+        if not self._torus_positions:
+            return []
+
+        # Build adjacency based on torus distance
+        node_ids = list(self._torus_positions.keys())
+        clusters = []
+        visited = set()
+
+        for seed_id in node_ids:
+            if seed_id in visited:
+                continue
+
+            # Start new cluster
+            cluster = [seed_id]
+            visited.add(seed_id)
+
+            # Find all nodes within threshold distance
+            for other_id in node_ids:
+                if other_id in visited:
+                    continue
+
+                pos_seed = self._torus_positions[seed_id]
+                pos_other = self._torus_positions[other_id]
+
+                # Compute torus distance
+                diff = np.abs(pos_seed - pos_other)
+                diff = np.where(diff > 180, 360 - diff, diff)
+                dist = np.sqrt(np.sum(diff ** 2))
+
+                if dist <= distance_threshold:
+                    cluster.append(other_id)
+                    visited.add(other_id)
+
+            if len(cluster) > 1:
+                clusters.append(cluster)
+
+        return clusters
+
+    def compute_semantic_centroid(self, node_ids: List[str]) -> Optional[np.ndarray]:
+        """
+        Compute the semantic centroid (average torus position) for a set of nodes.
+
+        Args:
+            node_ids: List of node IDs
+
+        Returns:
+            Average torus position (4,) or None if no valid nodes
+        """
+        valid_positions = []
+        for nid in node_ids:
+            if nid in self._torus_positions:
+                valid_positions.append(self._torus_positions[nid])
+
+        if not valid_positions:
+            return None
+
+        return np.mean(valid_positions, axis=0)
 
     def to_prompt_with_tuft(self) -> str:
         """Generate LLM-readable summary including TUFT metrics"""
