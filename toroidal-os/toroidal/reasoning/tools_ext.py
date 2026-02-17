@@ -326,6 +326,397 @@ def handle_system_info(args: Dict[str, Any]) -> str:
 
 
 # ============================================================================
+# WIFI & BLUETOOTH (Android Native Integration)
+# ============================================================================
+# These tools delegate to Android's native connectivity via:
+# - adb shell commands (when running via adb)
+# - Direct sysfs/property access (when running native on device)
+# - Android property get/set (getprop/setprop)
+
+def handle_wifi_status(args: Dict[str, Any]) -> str:
+    """
+    Get WiFi connection status.
+
+    On Android/ToroidalOS, this queries:
+    - /sys/class/net/wlan0/operstate
+    - Android connectivity service via dumpsys
+    - iwconfig if available
+    """
+    lines = []
+
+    # Method 1: sysfs (works on native Linux/Android)
+    wifi_paths = [
+        "/sys/class/net/wlan0/operstate",
+        "/sys/class/net/wlan0/carrier",
+        "/sys/class/net/wlan0/address",
+    ]
+    for path in wifi_paths:
+        if os.path.exists(path):
+            try:
+                val = open(path).read().strip()
+                name = os.path.basename(path)
+                lines.append(f"{name}: {val}")
+            except Exception:
+                pass
+
+    # Method 2: iwconfig (if available)
+    try:
+        result = subprocess.run(
+            ["iwconfig", "wlan0"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            # Parse key info from iwconfig output
+            for line in result.stdout.split("\n"):
+                if "ESSID" in line or "Access Point" in line or "Signal level" in line:
+                    lines.append(line.strip())
+    except Exception:
+        pass
+
+    # Method 3: Android dumpsys (when running on Android)
+    try:
+        result = subprocess.run(
+            ["dumpsys", "wifi"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            # Extract Wi-Fi state from dumpsys
+            for line in result.stdout.split("\n")[:20]:
+                if "Wi-Fi is" in line or "mNetworkInfo" in line or "SSID" in line:
+                    lines.append(line.strip())
+    except Exception:
+        pass
+
+    # Method 4: getprop for Android WiFi properties
+    try:
+        result = subprocess.run(
+            ["getprop", "wifi.interface"],
+            capture_output=True, text=True, timeout=2
+        )
+        if result.stdout.strip():
+            lines.append(f"WiFi interface: {result.stdout.strip()}")
+    except Exception:
+        pass
+
+    if not lines:
+        lines.append("WiFi: unavailable (no wlan0 interface)")
+        lines.append("[simulated: connected to 'HomeNetwork', signal 65%]")
+
+    return "\n".join(lines)
+
+
+def handle_wifi_scan(args: Dict[str, Any]) -> str:
+    """
+    Scan for available WiFi networks.
+
+    Uses iwlist or Android WifiManager scan results.
+    """
+    networks = []
+
+    # Method 1: iwlist (native Linux)
+    try:
+        result = subprocess.run(
+            ["iwlist", "wlan0", "scan"],
+            capture_output=True, text=True, timeout=15
+        )
+        if result.returncode == 0:
+            # Parse iwlist output
+            current_ssid = None
+            for line in result.stdout.split("\n"):
+                line = line.strip()
+                if "ESSID:" in line:
+                    # Extract SSID
+                    ssid = line.split("ESSID:")[1].strip().strip('"')
+                    if ssid:
+                        current_ssid = ssid
+                elif "Quality=" in line and current_ssid:
+                    quality = line.split("Quality=")[1].split()[0]
+                    networks.append(f"{current_ssid} ({quality})")
+                    current_ssid = None
+    except Exception:
+        pass
+
+    # Method 2: Android wpa_cli (if wpa_supplicant running)
+    try:
+        result = subprocess.run(
+            ["wpa_cli", "scan_results"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            for line in result.stdout.split("\n")[1:]:  # Skip header
+                if line.strip() and "\t" in line:
+                    parts = line.split("\t")
+                    if len(parts) >= 5:
+                        networks.append(f"{parts[4]} ({parts[2]})")
+    except Exception:
+        pass
+
+    if not networks:
+        networks = [
+            "[Simulated scan results]",
+            "HomeNetwork (WPA2, signal 75%)",
+            "Guest_WiFi (Open, signal 40%)",
+            "Neighbor_5G (WPA3, signal 20%)",
+        ]
+
+    return "Available networks:\n" + "\n".join(networks[:10])
+
+
+def handle_wifi_connect(args: Dict[str, Any]) -> str:
+    """
+    Connect to a WiFi network.
+
+    Args:
+        ssid: Network name
+        password: Network password (optional for open networks)
+
+    Uses wpa_supplicant or Android WifiManager.
+    """
+    ssid = args.get("ssid", "")
+    password = args.get("password", "")
+
+    if not ssid:
+        return "No SSID provided. Usage: wifi_connect {ssid: 'NetworkName', password: 'secret'}"
+
+    # Method 1: wpa_supplicant (native Linux/Android with wpa_cli)
+    try:
+        # Add network
+        result = subprocess.run(
+            ["wpa_cli", "add_network"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            net_id = result.stdout.strip().split()[-1]
+
+            # Set SSID
+            subprocess.run(
+                ["wpa_cli", "set_network", net_id, "ssid", f'"{ssid}"'],
+                capture_output=True, timeout=5
+            )
+
+            # Set password if provided
+            if password:
+                subprocess.run(
+                    ["wpa_cli", "set_network", net_id, "psk", f'"{password}"'],
+                    capture_output=True, timeout=5
+                )
+            else:
+                # Open network
+                subprocess.run(
+                    ["wpa_cli", "set_network", net_id, "key_mgmt", "NONE"],
+                    capture_output=True, timeout=5
+                )
+
+            # Enable network
+            subprocess.run(
+                ["wpa_cli", "enable_network", net_id],
+                capture_output=True, timeout=5
+            )
+
+            # Save config
+            subprocess.run(
+                ["wpa_cli", "save_config"],
+                capture_output=True, timeout=5
+            )
+
+            return f"Connecting to '{ssid}'... (check wifi_status for result)"
+    except Exception as e:
+        pass
+
+    # Method 2: nmcli (NetworkManager, if available)
+    try:
+        if password:
+            result = subprocess.run(
+                ["nmcli", "device", "wifi", "connect", ssid, "password", password],
+                capture_output=True, text=True, timeout=30
+            )
+        else:
+            result = subprocess.run(
+                ["nmcli", "device", "wifi", "connect", ssid],
+                capture_output=True, text=True, timeout=30
+            )
+
+        if result.returncode == 0:
+            return f"Connected to '{ssid}'"
+        else:
+            return f"Connection failed: {result.stderr.strip()}"
+    except Exception:
+        pass
+
+    # Fallback: simulated
+    return f"[Simulated] Would connect to '{ssid}' with password '{password[:3]}***'"
+
+
+def handle_bluetooth_status(args: Dict[str, Any]) -> str:
+    """
+    Get Bluetooth adapter status.
+
+    Queries BlueZ or Android Bluetooth service.
+    """
+    lines = []
+
+    # Method 1: hciconfig (BlueZ on Linux)
+    try:
+        result = subprocess.run(
+            ["hciconfig", "hci0"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            for line in result.stdout.split("\n")[:5]:
+                if line.strip():
+                    lines.append(line.strip())
+    except Exception:
+        pass
+
+    # Method 2: bluetoothctl (BlueZ)
+    try:
+        result = subprocess.run(
+            ["bluetoothctl", "show"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            for line in result.stdout.split("\n")[:10]:
+                if "Powered" in line or "Discoverable" in line or "Name" in line:
+                    lines.append(line.strip())
+    except Exception:
+        pass
+
+    # Method 3: Android dumpsys bluetooth
+    try:
+        result = subprocess.run(
+            ["dumpsys", "bluetooth_manager"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            for line in result.stdout.split("\n")[:15]:
+                if "enabled" in line.lower() or "state" in line.lower() or "name" in line.lower():
+                    lines.append(line.strip())
+    except Exception:
+        pass
+
+    if not lines:
+        lines.append("Bluetooth: unavailable")
+        lines.append("[simulated: enabled, name 'ToroidalOS', 2 paired devices]")
+
+    return "\n".join(lines)
+
+
+def handle_bluetooth_scan(args: Dict[str, Any]) -> str:
+    """
+    Scan for Bluetooth devices.
+
+    Uses bluetoothctl or Android BluetoothManager.
+    """
+    devices = []
+
+    # Method 1: bluetoothctl (BlueZ)
+    try:
+        # Start scan
+        subprocess.run(
+            ["bluetoothctl", "scan", "on"],
+            capture_output=True, timeout=10
+        )
+        # Get devices
+        result = subprocess.run(
+            ["bluetoothctl", "devices"],
+            capture_output=True, text=True, timeout=5
+        )
+        # Stop scan
+        subprocess.run(
+            ["bluetoothctl", "scan", "off"],
+            capture_output=True, timeout=5
+        )
+
+        if result.returncode == 0:
+            for line in result.stdout.strip().split("\n"):
+                if line.startswith("Device "):
+                    # Format: "Device AA:BB:CC:DD:EE:FF Device Name"
+                    parts = line.split(" ", 2)
+                    if len(parts) >= 3:
+                        devices.append(f"{parts[2]} ({parts[1]})")
+    except Exception:
+        pass
+
+    if not devices:
+        devices = [
+            "[Simulated scan results]",
+            "JBL Speaker (AA:BB:CC:11:22:33)",
+            "Galaxy Buds (DD:EE:FF:44:55:66)",
+            "Unknown Device (11:22:33:AA:BB:CC)",
+        ]
+
+    return "Discovered devices:\n" + "\n".join(devices[:10])
+
+
+def handle_bluetooth_connect(args: Dict[str, Any]) -> str:
+    """
+    Pair and connect to a Bluetooth device.
+
+    Args:
+        address: MAC address of the device
+        name: Optional device name (for logging)
+    """
+    address = args.get("address", "")
+    name = args.get("name", "")
+
+    if not address:
+        return "No address provided. Usage: bluetooth_connect {address: 'AA:BB:CC:DD:EE:FF'}"
+
+    # Validate MAC address format
+    import re
+    if not re.match(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', address):
+        return f"Invalid MAC address format: {address}"
+
+    # Method 1: bluetoothctl (BlueZ)
+    try:
+        # Pair
+        result = subprocess.run(
+            ["bluetoothctl", "pair", address],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0 and "already exists" not in result.stderr:
+            return f"Pairing failed: {result.stderr.strip()}"
+
+        # Connect
+        result = subprocess.run(
+            ["bluetoothctl", "connect", address],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            device_name = f" '{name}'" if name else ""
+            return f"Connected to{device_name} ({address})"
+        else:
+            return f"Connection failed: {result.stderr.strip()}"
+    except Exception as e:
+        pass
+
+    # Fallback: simulated
+    return f"[Simulated] Would connect to Bluetooth device {address}"
+
+
+def handle_bluetooth_disconnect(args: Dict[str, Any]) -> str:
+    """Disconnect from a Bluetooth device."""
+    address = args.get("address", "")
+
+    if not address:
+        return "No address provided."
+
+    try:
+        result = subprocess.run(
+            ["bluetoothctl", "disconnect", address],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            return f"Disconnected from {address}"
+        else:
+            return f"Disconnect failed: {result.stderr.strip()}"
+    except Exception:
+        pass
+
+    return f"[Simulated] Disconnected from {address}"
+
+
+# ============================================================================
 # HTML STRIPPING (minimal, no dependencies)
 # ============================================================================
 

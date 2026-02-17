@@ -28,6 +28,102 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kernel.hypergraph import HypergraphKernel, NodeType, create_thought, create_percept
 from memory.solenoid import SolenoidMemory, LLMCompressor
 from reasoning.tools import ToolDispatcher, parse_tool_calls, ToolResult
+
+
+class OllamaClient:
+    """
+    LLM client for Ollama API (http://localhost:11434).
+    Compatible with ToroidalOS's LLMClient interface.
+    """
+
+    def __init__(
+        self,
+        endpoint: str = "http://localhost:11434",
+        model: str = "qwen2.5:7b",
+        timeout: int = 120
+    ):
+        self.endpoint = endpoint
+        self.model = model
+        self.timeout = timeout
+        self._session = requests.Session()
+
+    def complete(
+        self,
+        prompt: str,
+        max_tokens: int = 256,
+        temperature: float = 0.7,
+        stop: List[str] = None
+    ) -> str:
+        """Generate completion from Ollama."""
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "num_predict": max_tokens,
+                "temperature": temperature,
+            }
+        }
+
+        if stop:
+            payload["options"]["stop"] = stop
+
+        try:
+            response = self._session.post(
+                f"{self.endpoint}/api/generate",
+                json=payload,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            return result.get("response", "").strip()
+
+        except requests.exceptions.ConnectionError:
+            return "[LLM offline - cannot generate response]"
+        except Exception as e:
+            return f"[LLM error: {str(e)}]"
+
+    def chat(
+        self,
+        messages: List[Dict],
+        max_tokens: int = 256,
+        temperature: float = 0.7
+    ) -> str:
+        """Generate chat completion from Ollama."""
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "num_predict": max_tokens,
+                "temperature": temperature,
+            }
+        }
+
+        try:
+            response = self._session.post(
+                f"{self.endpoint}/api/chat",
+                json=payload,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            return result.get("message", {}).get("content", "").strip()
+
+        except requests.exceptions.ConnectionError:
+            return "[LLM offline - cannot generate response]"
+        except Exception as e:
+            return f"[LLM error: {str(e)}]"
+
+    def is_available(self) -> bool:
+        """Check if Ollama server is running."""
+        try:
+            response = self._session.get(f"{self.endpoint}/api/version", timeout=5)
+            return response.status_code == 200
+        except:
+            return False
 from reasoning.topo_protocol import TopoProtocol
 from reasoning.epistemic import EpistemicDetector, create_epistemic_prerequisite
 from reasoning.desire import DesireField
@@ -108,6 +204,101 @@ class LLMClient:
         """Check if LLM server is running"""
         try:
             response = self._session.get(f"{self.endpoint}/health", timeout=5)
+            return response.status_code == 200
+        except:
+            return False
+
+
+class OllamaClient:
+    """
+    Ollama-compatible LLM client for local inference.
+
+    Uses Ollama API at http://localhost:11434
+    """
+
+    def __init__(
+        self,
+        endpoint: str = "http://localhost:11434",
+        model: str = "qwen2.5:7b",
+        context_size: int = 4096
+    ):
+        self.endpoint = endpoint
+        self.model = model
+        self.context_size = context_size
+        self._session = requests.Session()
+
+    def complete(
+        self,
+        prompt: str,
+        max_tokens: int = 256,
+        temperature: float = 0.7,
+        stop: List[str] = None
+    ) -> str:
+        """Generate completion from Ollama"""
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "num_predict": max_tokens,
+                "temperature": temperature,
+                "stop": stop or [],
+            }
+        }
+
+        try:
+            response = self._session.post(
+                f"{self.endpoint}/api/generate",
+                json=payload,
+                timeout=120
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            return result.get("response", "").strip()
+
+        except requests.exceptions.ConnectionError:
+            return "[Ollama offline - cannot generate response]"
+        except Exception as e:
+            return f"[Ollama error: {str(e)}]"
+
+    def chat(
+        self,
+        messages: List[Dict],
+        max_tokens: int = 256,
+        temperature: float = 0.7
+    ) -> str:
+        """Chat completion with message history"""
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "num_predict": max_tokens,
+                "temperature": temperature,
+            }
+        }
+
+        try:
+            response = self._session.post(
+                f"{self.endpoint}/api/chat",
+                json=payload,
+                timeout=120
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            return result.get("message", {}).get("content", "").strip()
+
+        except requests.exceptions.ConnectionError:
+            return "[Ollama offline - cannot generate response]"
+        except Exception as e:
+            return f"[Ollama error: {str(e)}]"
+
+    def is_available(self) -> bool:
+        """Check if Ollama server is running"""
+        try:
+            response = self._session.get(f"{self.endpoint}/api/version", timeout=5)
             return response.status_code == 200
         except:
             return False
@@ -424,40 +615,92 @@ RESPONSE (be brief):"""
 class PerceptionEngine:
     """
     Handles multimodal perception via Qwen2.5-Omni.
-    
+
     Modalities:
     - Text (keyboard/speech-to-text)
     - Audio (microphone)
     - Vision (camera)
     """
-    
-    def __init__(self, llm: LLMClient, graph: HypergraphKernel):
+
+    def __init__(self, llm: LLMClient, graph: HypergraphKernel, multimodal: 'MultimodalClient' = None):
         self.llm = llm
         self.graph = graph
-    
+        self.multimodal = multimodal
+
     def perceive_text(self, text: str) -> str:
         """Process text input"""
         percept = create_percept(self.graph, "text", text)
         return percept.id
-    
+
     def perceive_audio(self, audio_path: str) -> Optional[str]:
         """
         Process audio input via Qwen2.5-Omni.
-        
-        Note: Requires llama-server started with --mmproj for audio support
+
+        Returns transcribed text, or None if transcription failed.
+        Also creates a percept node in the hypergraph.
         """
-        # This would use the multimodal endpoint
-        # For now, placeholder
+        # Create percept node regardless of transcription success
         percept = create_percept(self.graph, "audio", {"path": audio_path})
+
+        # If multimodal client available, transcribe
+        if self.multimodal:
+            try:
+                result = self.multimodal.transcribe_audio(audio_path)
+                if result:
+                    # Store transcription in percept data
+                    percept.data["transcription"] = result.text
+                    percept.data["language"] = result.language
+                    percept.data["duration"] = result.duration_seconds
+                    return result.text
+            except Exception as e:
+                print(f"[PERCEPTION] Audio transcription failed: {e}")
+
         return percept.id
-    
-    def perceive_image(self, image_path: str) -> Optional[str]:
+
+    def perceive_image(self, image_path: str, prompt: str = "Describe this image.") -> Optional[str]:
         """
         Process image input via Qwen2.5-Omni.
-        
-        Note: Requires llama-server started with --mmproj for vision support
+
+        Args:
+            image_path: Path to image file
+            prompt: What to ask about the image
+
+        Returns description text, or None if processing failed.
         """
         percept = create_percept(self.graph, "vision", {"path": image_path})
+
+        if self.multimodal:
+            try:
+                import base64
+                with open(image_path, "rb") as f:
+                    image_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+                # Build multimodal prompt
+                payload = {
+                    "prompt": f"{prompt}\n\n<__media__>",
+                    "multimodal_data": [image_b64],
+                    "n_predict": 256,
+                    "temperature": 0.7,
+                    "stream": False,
+                }
+
+                # Call via LLM client's session
+                resp = self.llm._session.post(
+                    f"{self.llm.endpoint}/completion",
+                    json=payload,
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                result = resp.json()
+
+                description = result.get("content", "").strip()
+                if description:
+                    percept.data["description"] = description
+                    return description
+
+            except Exception as e:
+                print(f"[PERCEPTION] Image processing failed: {e}")
+
         return percept.id
 
 
@@ -515,12 +758,16 @@ class ToroidalOS:
         memory_levels: int = 4,
         kernel_bridge=None,
         embedding_config=None,
-        enable_embeddings: bool = True
+        enable_embeddings: bool = True,
+        multimodal=None,
     ):
         print("[TOROIDAL] Initializing...")
 
         # Initialize LLM client
         self.llm = LLMClient(endpoint=llm_endpoint)
+
+        # Store multimodal client (for audio I/O via Qwen2.5-Omni)
+        self.multimodal = multimodal
 
         # Initialize embedding service if enabled
         self.embedding_service = None
@@ -623,8 +870,9 @@ class ToroidalOS:
             embedding_service=self.embedding_service,
         )
 
-        # Initialize perception
-        self.perception = PerceptionEngine(self.llm, self.graph)
+        # Initialize perception with multimodal support
+        self.multimodal = multimodal
+        self.perception = PerceptionEngine(self.llm, self.graph, multimodal=multimodal)
 
         # Initialize action
         self.action = ActionEngine(self.graph)

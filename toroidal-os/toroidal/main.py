@@ -240,6 +240,11 @@ def main():
         help="Disable voice input"
     )
     parser.add_argument(
+        "--voice-output",
+        action="store_true",
+        help="Enable voice output (TTS)"
+    )
+    parser.add_argument(
         "--test",
         action="store_true",
         help="Test mode (no LLM server)"
@@ -287,21 +292,50 @@ def main():
             if not llm_server.start():
                 print("[ERROR] Failed to start LLM server")
                 print("[INFO] Running in limited mode without LLM")
-        
-        # Initialize main OS
+        # Initialize multimodal client for audio processing (before ToroidalOS)
+        multimodal = None
+        if not args.test:
+            try:
+                from reasoning.multimodal import MultimodalClient, AudioProcessor
+                multimodal = MultimodalClient(
+                    endpoint=f"http://127.0.0.1:{args.port}",
+                    timeout=60,
+                )
+                print("[TOROIDAL] Multimodal client initialized")
+            except ImportError as e:
+                print(f"[TOROIDAL] Multimodal not available: {e}")
+
+        # Initialize main OS (with multimodal support)
         toroidal = ToroidalOS(
             llm_endpoint=f"http://127.0.0.1:{args.port}",
             max_nodes=5000,
-            memory_levels=4
+            memory_levels=4,
+            multimodal=multimodal,
         )
-        
+
         # Start voice handler (optional)
-        if not args.no_voice:
+        audio_processor = None
+        if multimodal and not args.no_voice:
+            audio_processor = AudioProcessor(multimodal)
+
             def on_audio(audio_path):
-                # Process audio through Qwen2.5-Omni
-                # For now, placeholder
-                pass
-            
+                """Process audio through Qwen2.5-Omni"""
+                if audio_processor:
+                    # Check for speech and transcribe
+                    text = audio_processor.process_audio_chunk(
+                        audio_path,
+                        context="User voice input"
+                    )
+                    if text:
+                        print(f"\n[VOICE] Heard: {text}")
+                        # Process through the OS
+                        response = toroidal.process(text)
+                        print(f"TOROIDAL: {response}\n")
+
+                        # Optionally speak response
+                        if args.voice_output:
+                            toroidal.action.speak(response)
+
             audio_handler = AudioHandler(on_audio)
             audio_handler.start()
         

@@ -475,8 +475,8 @@ Input -> Observe(hypergraph + memory) -> LLM generates thought
 The system observes its own state (hypergraph structure, memory contents, previous thought), generates a new thought via the LLM, and checks whether the thought has converged. Convergence is detected by:
 
 - **Explicit marker**: The LLM outputs "CONVERGED:" followed by its final answer
-- **Implicit similarity**: Jaccard similarity of word sets > 0.9 with previous iteration
-- **Timeout**: Maximum 5 iterations
+- **Embedding similarity**: Cosine similarity via Octen-Embedding-0.6B > 0.9 with previous iteration
+- **Timeout**: Maximum 5 iterations (adjusted by Online DPO)
 
 The number of iterations to convergence provides a natural confidence metric: 1 iteration = high confidence (the answer was immediately stable); 5 iterations with timeout = low confidence (the reasoning oscillated).
 
@@ -485,19 +485,87 @@ The number of iterations to convergence provides a natural confidence metric: 1 
 The OS-level hypergraph kernel extends the bare-metal Topo9 kernel with:
 
 - **Typed nodes**: PROCESS, MEMORY, SENSOR, THOUGHT, PERCEPT, ACTION, BELIEF
+- **Trust tiers**: KEEL (immutable core beliefs), HULL (stable memories), DECK (working set), RIGGING (temporary)
 - **Self-referential model**: A `__self__` node represents the graph itself, updated on every mutation
 - **Energy decay**: Nodes lose energy over time; low-energy, low-connectivity nodes are garbage collected
 - **Observer pattern**: External systems (memory, reasoning) can subscribe to graph mutation events
 
-### 8.3 Integration
+### 8.3 Multimodal Integration
+
+ToroidalOS v0.2 adds full multimodal support via Qwen2.5-Omni:
+
+**Audio Input (Speech-to-Text)**
+```
+Microphone (16kHz, 3s chunks)
+    → AudioHandler (PyAudio)
+    → AudioProcessor (VAD: energy threshold)
+    → MultimodalClient.transcribe_audio()
+        → POST /completion with multimodal_data: [base64 audio]
+    → Transcribed text
+    → ToroidalOS.process()
+```
+
+**Audio Output (Text-to-Speech)**
+- Primary: Qwen2.5-Omni audio generation (when available)
+- Fallback: espeak-ng for reliable TTS
+
+**API Format (llama.cpp server)**
+```json
+{
+  "prompt": "Transcribe: <__media__>",
+  "multimodal_data": ["<base64-encoded-audio>"],
+  "n_predict": 512,
+  "temperature": 0.1
+}
+```
+
+### 8.4 Tier 4: Autonomy & Self-Improvement
+
+ToroidalOS v0.2 implements advanced autonomy features:
+
+**Desire Field** — Internal goals with Berry phase pressure:
+- Goals accumulate pressure over time
+- High-pressure goals spawn autonomous thoughts
+- Cross-region goals (bridges) have higher weight
+
+**Dream Cycle** — Periodic solenoid history clustering:
+- Runs during idle periods
+- Identifies archetypes in memory patterns
+- Discovers cross-patterns between distant concepts
+
+**Online DPO** — Closed-loop training from kernel metrics:
+- Records experiences (prompt, response, reward, iterations)
+- Constructs preference pairs from reward ranking
+- Adjusts parameters: temperature bias, max iterations bias
+- Reward = w_coh × coherence + w_curv × (1-curvature) + w_bridge × bridges
+
+### 8.5 Tool System
+
+A structured tool dispatch system with Berry phase costs:
+
+| Region | Bits | Berry Cost | Examples |
+|--------|------|------------|----------|
+| SEMANTIC | 6-8 | 30 | memory_search, kernel_state |
+| ENVIRON | 3-5 | 50 | sensors, sensor_request |
+| MOTION | 0-2 | 110 | shell, wifi_connect, bluetooth_connect |
+
+Cross-region tool calls accumulate higher Berry phase, encouraging semantic locality.
+
+### 8.6 System Integration
 
 The complete system integrates:
 
-1. **HypergraphKernel** — graph structure, emergent time, garbage collection
-2. **SolenoidMemory** — 4-level hierarchical compression
-3. **SelfReferentialEngine** — fixed-point iteration with convergence detection
-4. **PerceptionEngine** — text, audio, vision input via Qwen2.5-Omni
-5. **ActionEngine** — speech output (espeak), display (framebuffer)
+1. **HypergraphKernel** — graph structure, emergent time, garbage collection, trust tiers
+2. **SolenoidMemory** — 4-level hierarchical compression with LLM summarization
+3. **SelfReferentialEngine** — fixed-point iteration with embedding-based convergence
+4. **PerceptionEngine** — text, audio, vision input via Qwen2.5-Omni with MultimodalClient
+5. **ActionEngine** — speech output (Qwen TTS / espeak fallback), display (framebuffer)
+6. **EmbeddingService** — Octen-Embedding-0.6B for semantic similarity and torus mapping
+7. **ToolDispatcher** — structured tool calling with topo:// protocol
+8. **EpistemicDetector** — knowledge state classification (HAS_KNOWLEDGE, KNOWLEDGE_GAP, UNCERTAIN)
+9. **DesireField** — autonomous goal pursuit
+10. **DreamCycle** — idle-time memory consolidation
+11. **OnlineDPO** — preference learning from experience
 
 ---
 
@@ -607,21 +675,38 @@ Topology is conserved between defect events (normal kernel operation); changes o
 
 ## 11. Future Directions
 
-### 11.1 Trust Tiers
+### 11.1 Trust Tiers ✅ IMPLEMENTED
 
-Adding a 2-bit tier field to Node (KEEL/HULL/CARGO/EPHEMERAL) would allow the oracle to reward traces that protect high-tier nodes from decay, directly implementing HyperGraphAstra's Guendelman tension formalism in the DPO pipeline.
+Adding a 2-bit tier field to Node (KEEL/HULL/CARGO/EPHEMERAL) has been implemented. Core beliefs are stored at KEEL tier and are protected from decay and garbage collection. The oracle can reward traces that protect high-tier nodes.
 
-### 11.2 Desire Field Proxy
+### 11.2 Desire Field Proxy ✅ IMPLEMENTED
 
-The desire field could be approximated as a "goal node" whose Berry phase accumulation the oracle rewards. ThoughtHole burst mechanics (GRB, Critical Mass, Plasma Anger from HyperGraphAstra) could become measurable events when rumination mass or internal temperature reach thresholds.
+The desire field has been implemented as a goal system with Berry phase pressure. Goals accumulate pressure over time and spawn autonomous thoughts. The Dream Cycle implements consolidation mechanics (archetype discovery, cross-pattern extraction).
 
-### 11.3 Closed-Loop DPO
+### 11.3 Closed-Loop DPO ✅ IMPLEMENTED
 
-The current pipeline is open-loop: generate candidates offline, score them, produce training data. A closed-loop system would run the DPO-tuned model on the Mi Mix hardware, measure its topological metrics in real-time via the KernelBridge, and generate online training data for continuous improvement.
+Online DPO is now operational. The system records reasoning experiences, computes reward from kernel metrics, constructs preference pairs, and adjusts reasoning biases (temperature, max iterations) in real-time.
 
-### 11.4 Multi-Agent Topology
+### 11.4 Multi-Agent Topology (PLANNED)
 
 Multiple Topo9 kernels could be networked (via FIBER hyperedges across kernel boundaries), enabling multi-agent systems where coherence metrics measure inter-agent alignment.
+
+### 11.5 Embedding Layer Integration ✅ IMPLEMENTED
+
+Octen-Embedding-0.6B has been integrated for semantic similarity, replacing Jaccard word overlap for convergence detection. The embedding layer maps text to 4D torus coordinates (θ₁, θ₂, θ₃, θ₄) for topological storage.
+
+### 11.6 Multimodal I/O ✅ IMPLEMENTED
+
+Full audio input/output via Qwen2.5-Omni is now operational:
+- Speech-to-text via llama.cpp `/completion` endpoint with `multimodal_data`
+- Text-to-speech with espeak fallback
+- Voice activity detection (energy-based VAD)
+
+### 11.7 Connectivity Tools ✅ IMPLEMENTED
+
+WiFi and Bluetooth tools now delegate to native Android/Linux connectivity:
+- `wifi_status`, `wifi_scan`, `wifi_connect`
+- `bluetooth_status`, `bluetooth_scan`, `bluetooth_connect`, `bluetooth_disconnect`
 
 ---
 
@@ -696,7 +781,7 @@ The author gratefully acknowledges:
 
 ---
 
-**Document Version:** 1.0
+**Document Version:** 1.1 — Added multimodal integration, Tier 4 autonomy, embedding layer, connectivity tools
 
 **Last Updated:** February 12, 2026
 
